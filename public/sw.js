@@ -9,11 +9,9 @@ const CORE_SHELL = [
   './vendor/firebase-firestore.js',
   './vendor/lucide.min.js',
   './vendor/app-compiled.js?v=20261117_111',
-  './vendor/dashboard-compiled.js?v=20261117_111',
   './apple-touch-icon.png',
   './app-icon-192.png',
-  './app-icon-512.png',
-  './dashboard-icon-180.png'
+  './app-icon-512.png'
 ];
 
 self.addEventListener('install', (event) => {

@@ -28,15 +28,15 @@ async function updateFirestorePortalUrl(tunnelUrl) {
   if (!tunnelUrl) return;
   try {
     const base = tunnelUrl.endsWith('/') ? tunnelUrl : (tunnelUrl + '/');
-    const apkDirectUrl = base + 'AlOsta_App.apk';
-    const dashApkDirectUrl = base + 'AlOsta_Dashboard.apk';
+    const apkDirectUrl = 'https://github.com/waadpc90-ctrl/alosta-app/raw/main/AlOsta_App.apk';
+    const dashApkDirectUrl = '';
     const endpoint = 'https://firestore.googleapis.com/v1/projects/craftsmanapp-3e46b/databases/(default)/documents/settings/app_config?updateMask.fieldPaths=portalBaseUrl&updateMask.fieldPaths=apkUrl&updateMask.fieldPaths=rawApkUrl&updateMask.fieldPaths=dashboardApkUrl&updateMask.fieldPaths=latestVersion&updateMask.fieldPaths=latestDashboardVersion&updateMask.fieldPaths=forceUpdate&updateMask.fieldPaths=stopUpdate&updateMask.fieldPaths=pushUpdateToken&updateMask.fieldPaths=pushTargetVersion';
     const res = await fetch(endpoint, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         fields: {
-          portalBaseUrl: { stringValue: base },
+          portalBaseUrl: { stringValue: 'https://waadpc90-ctrl.github.io/alosta-app/' },
           apkUrl: { stringValue: apkDirectUrl },
           rawApkUrl: { stringValue: apkDirectUrl },
           dashboardApkUrl: { stringValue: dashApkDirectUrl },
