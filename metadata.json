@@ -1,0 +1,10 @@
+{
+  "name": "الأسطة",
+  "description": "نظام أستاذ وعد (الأسطة) لإدارة المقاولات والمشاريع وسوق العمال والحضور والرواتب",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

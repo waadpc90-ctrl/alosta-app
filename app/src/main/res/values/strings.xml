@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">الأسطة</string>
+    <string name="offline_banner">أنت غير متصل بالإنترنت — يتم عرض البيانات المحفوظة محلياً</string>
+    <string name="retry">إعادة المحاولة</string>
+    <string name="exit_confirm_title">إغلاق التطبيق</string>
+    <string name="exit_confirm_message">هل تريد الخروج من تطبيق الأسطة؟</string>
+    <string name="yes">نعم</string>
+    <string name="cancel">إلغاء</string>
+    <string name="print_job_name">كشف_رواتب_الأسطة</string>
+    <string name="notification_channel_name">إشعارات الأسطة</string>
+    <string name="notification_channel_desc">إشعارات طلبات الحضور وعروض العمل</string>
+</resources>

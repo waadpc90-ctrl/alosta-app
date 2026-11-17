@@ -1,0 +1,77 @@
+package com.example
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ExampleUnitTest {
+
+    @Test
+    fun pbkdf2Hash_isDeterministicAndSalted() {
+        val hash1 = AlOstaSecurityVault.pbkdf2Hash("waad2026", "admin_user_1")
+        val hash2 = AlOstaSecurityVault.pbkdf2Hash("waad2026", "admin_user_1")
+        val differentSaltHash = AlOstaSecurityVault.pbkdf2Hash("waad2026", "admin_user_2")
+        val differentSecretHash = AlOstaSecurityVault.pbkdf2Hash("wrong_pass", "admin_user_1")
+
+        assertEquals(64, hash1.length)
+        assertEquals(hash1, hash2)
+        assertNotEquals(hash1, differentSaltHash)
+        assertNotEquals(hash1, differentSecretHash)
+    }
+
+    @Test
+    fun isTrustedWebViewOrigin_enforcesAssetIsolation() {
+        assertTrue(AlOstaSecurityVault.isTrustedWebViewOrigin("file:///android_asset/index.html"))
+        assertTrue(AlOstaSecurityVault.isTrustedWebViewOrigin("file:///android_asset/dashboard.html?storePortal=ST-123456"))
+        assertTrue(AlOstaSecurityVault.isTrustedWebViewOrigin("about:blank"))
+
+        // Untrusted origins must be blocked from accessing privileged bridge
+        assertFalse(AlOstaSecurityVault.isTrustedWebViewOrigin("https://evil.example.com/phish.html"))
+        assertFalse(AlOstaSecurityVault.isTrustedWebViewOrigin("http://malicious.site/"))
+        assertFalse(AlOstaSecurityVault.isTrustedWebViewOrigin("file:///data/data/com.aistudio.alosta.wpc90x/shared_prefs/al_osta_local_db.xml"))
+        assertFalse(AlOstaSecurityVault.isTrustedWebViewOrigin("javascript:alert(1)"))
+    }
+
+    @Test
+    fun isSafeExternalHttpUrl_blocksLoopbackMetadataAndFileProtocols() {
+        assertTrue(AlOstaSecurityVault.isSafeExternalHttpUrl("https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/view"))
+        assertTrue(AlOstaSecurityVault.isSafeExternalHttpUrl("https://maps.app.goo.gl/xyz123"))
+
+        // SSRF & local/loopback targets must be blocked
+        assertFalse(AlOstaSecurityVault.isSafeExternalHttpUrl("http://127.0.0.1:8080/admin"))
+        assertFalse(AlOstaSecurityVault.isSafeExternalHttpUrl("http://localhost/secret"))
+        assertFalse(AlOstaSecurityVault.isSafeExternalHttpUrl("http://169.254.169.254/latest/meta-data/"))
+        assertFalse(AlOstaSecurityVault.isSafeExternalHttpUrl("http://10.0.2.2:3000/"))
+        assertFalse(AlOstaSecurityVault.isSafeExternalHttpUrl("http://0.0.0.0/"))
+        assertFalse(AlOstaSecurityVault.isSafeExternalHttpUrl("file:///etc/hosts"))
+        assertFalse(AlOstaSecurityVault.isSafeExternalHttpUrl("javascript:alert(1)"))
+    }
+
+    @Test
+    fun isSafeIntentUrl_blocksXssAndLocalFileSchemes() {
+        assertTrue(AlOstaSecurityVault.isSafeIntentUrl("https://wa.me/9647701234567"))
+        assertTrue(AlOstaSecurityVault.isSafeIntentUrl("whatsapp://send?phone=9647701234567"))
+        assertTrue(AlOstaSecurityVault.isSafeIntentUrl("tel:07701234567"))
+        assertTrue(AlOstaSecurityVault.isSafeIntentUrl("geo:33.3152,44.3661"))
+        assertTrue(AlOstaSecurityVault.isSafeIntentUrl("alosta://store?storePortal=store_1&code=ST-ABCDEF"))
+
+        assertFalse(AlOstaSecurityVault.isSafeIntentUrl("javascript:window.AndroidApp.loadLocalDb()"))
+        assertFalse(AlOstaSecurityVault.isSafeIntentUrl("vbscript:msgbox(1)"))
+        assertFalse(AlOstaSecurityVault.isSafeIntentUrl("file:///data/data/com.aistudio.alosta.wpc90x/"))
+        assertFalse(AlOstaSecurityVault.isSafeIntentUrl("content://com.android.contacts/contacts"))
+        assertFalse(AlOstaSecurityVault.isSafeIntentUrl("data:text/html,<script>alert(1)</script>"))
+    }
+
+    @Test
+    fun googleDriveFileIdExtraction_andDirectDownloadConversion() {
+        val sampleDriveUrl = "https://drive.google.com/file/d/1aBcDeFgHiJkLmNoPqRsTuVwXyZ12345/view?usp=sharing"
+        val extractedId = AlOstaApkUpdater.extractGoogleDriveFileId(sampleDriveUrl)
+        assertEquals("1aBcDeFgHiJkLmNoPqRsTuVwXyZ12345", extractedId)
+
+        val directUrl = AlOstaApkUpdater.toDirectDownloadUrl(sampleDriveUrl)
+        assertTrue(directUrl.contains("drive.usercontent.google.com/download"))
+        assertTrue(directUrl.contains("id=1aBcDeFgHiJkLmNoPqRsTuVwXyZ12345"))
+    }
+}
