@@ -8,6 +8,13 @@ plugins {
   alias(libs.plugins.google.services)
 }
 
+val indexHtmlAsset = file("src/main/assets/index.html")
+val detectedVersionName = if (indexHtmlAsset.exists()) {
+  Regex("""const\s+APP_VERSION\s*=\s*"(\d+\.\d+\.\d+)";""")
+    .find(indexHtmlAsset.readText())?.groupValues?.get(1) ?: "1.0.11"
+} else "1.0.11"
+val detectedVersionCode = detectedVersionName.substringAfterLast('.').toIntOrNull() ?: 11
+
 android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
@@ -16,8 +23,8 @@ android {
     applicationId = "com.aistudio.alosta.wpc90x"
     minSdk = 24
     targetSdk = 36
-    versionCode = 11
-    versionName = "1.0.11"
+    versionCode = detectedVersionCode
+    versionName = detectedVersionName
 
     buildConfigField("long", "BUILD_TIMESTAMP_MS", "${System.currentTimeMillis()}L")
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
