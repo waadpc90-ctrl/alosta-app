@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.alosta.wpc90x"
     minSdk = 24
     targetSdk = 36
-    versionCode = 10
-    versionName = "1.0.10"
+    versionCode = 11
+    versionName = "1.0.11"
 
     buildConfigField("long", "BUILD_TIMESTAMP_MS", "${System.currentTimeMillis()}L")
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
