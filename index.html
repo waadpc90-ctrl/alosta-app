@@ -3990,12 +3990,27 @@
             const { lang, setLang, theme, setTheme } = useContext(AppContext);
             const [sunlight, setSunlight] = useState(() => localStorage.getItem('app_sunlight_mode') === '1');
             const [openSettings, setOpenSettings] = useState(false);
+            const [updateStatus, setUpdateStatus] = useState(() => (
+                window.__ALOSTA_UPDATE_STATUS || { available: false, serverVer: APP_VERSION, currentVer: APP_VERSION }
+            ));
 
             useEffect(() => {
                 if (sunlight) document.documentElement.classList.add('sunlight-mode');
                 else document.documentElement.classList.remove('sunlight-mode');
                 localStorage.setItem('app_sunlight_mode', sunlight ? '1' : '0');
             }, [sunlight]);
+
+            useEffect(() => {
+                const onStatus = (e) => {
+                    if (e && e.detail) setUpdateStatus(e.detail);
+                    else if (window.__ALOSTA_UPDATE_STATUS) setUpdateStatus({ ...window.__ALOSTA_UPDATE_STATUS });
+                };
+                window.addEventListener('alosta-update-status-changed', onStatus);
+                if (window.__ALOSTA_UPDATE_STATUS) {
+                    setUpdateStatus({ ...window.__ALOSTA_UPDATE_STATUS });
+                }
+                return () => window.removeEventListener('alosta-update-status-changed', onStatus);
+            }, [openSettings]);
 
             return (
                 <>
@@ -4127,43 +4142,81 @@
                                 )}
                                 <div className="pt-2 border-t border-slate-100 dark:border-slate-700 space-y-2 text-center">
                                     {window.AndroidApp ? (
-                                        <button
-                                            type="button"
-                                            onClick={() => {
-                                                haptic();
-                                                setOpenSettings(false);
-                                                if (typeof window.__triggerManualApkUpdate === 'function') {
-                                                    window.__triggerManualApkUpdate();
-                                                }
-                                            }}
-                                            className="w-full p-3 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/70 font-black text-xs flex items-center justify-center gap-2 active:scale-95 transition-all"
-                                        >
-                                            <Icon name="download-cloud" size={16} />
-                                            <span>{lang === 'ar' ? `تحديث نسخة التطبيق (الحالية v${APP_VERSION})` : `Check / Install App Update (v${APP_VERSION})`}</span>
-                                        </button>
-                                    ) : (
-                                        <div className="space-y-2">
+                                        updateStatus.available ? (
                                             <button
                                                 type="button"
-                                                onClick={async () => {
+                                                onClick={() => {
                                                     haptic();
-                                                    try {
-                                                        if ('caches' in window) {
-                                                            const keys = await caches.keys();
-                                                            await Promise.all(keys.map(k => caches.delete(k)));
-                                                        }
-                                                        if ('serviceWorker' in navigator) {
-                                                            const regs = await navigator.serviceWorker.getRegistrations();
-                                                            await Promise.all(regs.map(r => r.update()));
-                                                        }
-                                                    } catch (e) {}
-                                                    window.location.reload();
+                                                    setOpenSettings(false);
+                                                    if (typeof window.__triggerManualApkUpdate === 'function') {
+                                                        window.__triggerManualApkUpdate();
+                                                    }
                                                 }}
-                                                className="w-full p-3 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/70 font-black text-xs flex items-center justify-center gap-2 active:scale-95 transition-all"
+                                                className="w-full p-3 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs flex items-center justify-center gap-2 shadow-md active:scale-95 transition-all"
                                             >
-                                                <Icon name="refresh-cw" size={16} />
-                                                <span>{lang === 'ar' ? `تحديث فوري لآخر نسخة iOS / ويب (v${APP_VERSION})` : `Refresh Latest iOS / Web Version (v${APP_VERSION})`}</span>
+                                                <Icon name="download-cloud" size={16} />
+                                                <span>
+                                                    {lang === 'ar'
+                                                        ? `تحديث متوفر! تثبيت الإصدار الجديد (v${updateStatus.serverVer})`
+                                                        : `Update Available! Install (v${updateStatus.serverVer})`}
+                                                </span>
                                             </button>
+                                        ) : (
+                                            <button
+                                                type="button"
+                                                disabled={true}
+                                                className="w-full p-3 rounded-2xl bg-slate-100 dark:bg-slate-900/90 text-emerald-700 dark:text-emerald-400 border border-emerald-200/80 dark:border-emerald-800/60 font-black text-xs flex items-center justify-center gap-2 opacity-90 cursor-not-allowed select-none"
+                                            >
+                                                <Icon name="check-circle" size={16} />
+                                                <span>
+                                                    {lang === 'ar'
+                                                        ? `النسخة الحالية (v${updateStatus.currentVer || APP_VERSION}) هي آخر تحديث متوفر ✓`
+                                                        : `Up to date — Latest version installed (v${updateStatus.currentVer || APP_VERSION}) ✓`}
+                                                </span>
+                                            </button>
+                                        )
+                                    ) : (
+                                        <div className="space-y-2">
+                                            {updateStatus.available ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={async () => {
+                                                        haptic();
+                                                        try {
+                                                            if ('caches' in window) {
+                                                                const keys = await caches.keys();
+                                                                await Promise.all(keys.map(k => caches.delete(k)));
+                                                            }
+                                                            if ('serviceWorker' in navigator) {
+                                                                const regs = await navigator.serviceWorker.getRegistrations();
+                                                                await Promise.all(regs.map(r => r.update()));
+                                                            }
+                                                        } catch (e) {}
+                                                        window.location.reload();
+                                                    }}
+                                                    className="w-full p-3 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs flex items-center justify-center gap-2 shadow-md active:scale-95 transition-all"
+                                                >
+                                                    <Icon name="refresh-cw" size={16} />
+                                                    <span>
+                                                        {lang === 'ar'
+                                                            ? `تحديث متوفر! الترقية إلى (v${updateStatus.serverVer})`
+                                                            : `Update Available! Refresh to (v${updateStatus.serverVer})`}
+                                                    </span>
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    disabled={true}
+                                                    className="w-full p-3 rounded-2xl bg-slate-100 dark:bg-slate-900/90 text-emerald-700 dark:text-emerald-400 border border-emerald-200/80 dark:border-emerald-800/60 font-black text-xs flex items-center justify-center gap-2 opacity-90 cursor-not-allowed select-none"
+                                                >
+                                                    <Icon name="check-circle" size={16} />
+                                                    <span>
+                                                        {lang === 'ar'
+                                                            ? `النسخة الحالية (v${updateStatus.currentVer || APP_VERSION}) هي آخر تحديث متوفر ✓`
+                                                            : `Up to date — Latest version (v${updateStatus.currentVer || APP_VERSION}) ✓`}
+                                                    </span>
+                                                </button>
+                                            )}
                                             {!window.IS_IOS_STANDALONE && (
                                                 <button
                                                     type="button"
@@ -4385,6 +4438,35 @@
             const [orderItemsText, setOrderItemsText] = useState('');
             const [orderCostPreset, setOrderCostPreset] = useState('');
             const [adminLiveGps, setAdminLiveGps] = useState(null);
+            const [favoriteStoreIds, setFavoriteStoreIds] = useState(() => {
+                try {
+                    const raw = localStorage.getItem(`alosta_fav_stores_${adminId}`);
+                    const parsed = raw ? JSON.parse(raw) : [];
+                    return Array.isArray(parsed) ? parsed : [];
+                } catch (e) {
+                    return [];
+                }
+            });
+            const [contractorStoreRatings, setContractorStoreRatings] = useState(() => {
+                try {
+                    const raw = localStorage.getItem(`alosta_store_ratings_${adminId}`);
+                    const parsed = raw ? JSON.parse(raw) : {};
+                    return (parsed && typeof parsed === 'object') ? parsed : {};
+                } catch (e) {
+                    return {};
+                }
+            });
+            const [storeRatingModal, setStoreRatingModal] = useState({
+                open: false,
+                store: null,
+                prices: 5,
+                quality: 5,
+                delivery: 5,
+                service: 5,
+                note: '',
+                addToFav: true,
+                saving: false
+            });
             const [appSettings, setAppSettings] = useState({
                 monetizationEnabled: false,
                 autoEnableOnTarget: false,
@@ -4599,7 +4681,19 @@
                     }),
                     db.collection('admins').doc(adminId).onSnapshot(docSnap => {
                         if (docSnap.exists) {
-                            setAdminProfile({ id: docSnap.id, ...(docSnap.data() || {}) });
+                            const pData = docSnap.data() || {};
+                            setAdminProfile({ id: docSnap.id, ...pData });
+                            if (Array.isArray(pData.favoriteStoreIds)) {
+                                setFavoriteStoreIds(pData.favoriteStoreIds);
+                                try { localStorage.setItem(`alosta_fav_stores_${adminId}`, JSON.stringify(pData.favoriteStoreIds)); } catch (e) {}
+                            }
+                            if (pData.storeRatings && typeof pData.storeRatings === 'object') {
+                                setContractorStoreRatings(prev => {
+                                    const merged = { ...prev, ...pData.storeRatings };
+                                    try { localStorage.setItem(`alosta_store_ratings_${adminId}`, JSON.stringify(merged)); } catch (e) {}
+                                    return merged;
+                                });
+                            }
                         }
                     }),
                 ];
@@ -4736,17 +4830,160 @@
                 return dbProds.filter(p => p && p.id && activeStoreIds.has(p.storeId));
             }, [data.storeProducts, effectiveStoresList]);
 
+            const toggleFavoriteStore = async (st, e) => {
+                if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+                if (!st || !st.id) return;
+                haptic();
+                const exists = favoriteStoreIds.includes(st.id);
+                const nextFavs = exists
+                    ? favoriteStoreIds.filter(id => id !== st.id)
+                    : [st.id, ...favoriteStoreIds.filter(id => id !== st.id)];
+                setFavoriteStoreIds(nextFavs);
+                try {
+                    localStorage.setItem(`alosta_fav_stores_${adminId}`, JSON.stringify(nextFavs));
+                } catch (err) {}
+                addToast(
+                    lang === 'ar'
+                        ? (exists ? `تمت إزالة "${st.name}" من المعارض المفضلة` : `⭐ تمت إضافة "${st.name}" إلى قائمة معارضك المفضلة للوصول السريع ✓`)
+                        : (exists ? `Removed "${st.name}" from favorites` : `⭐ Added "${st.name}" to favorite showrooms ✓`)
+                );
+                if (db && adminId) {
+                    try {
+                        await db.collection('admins').doc(adminId).set({ favoriteStoreIds: nextFavs }, { merge: true });
+                    } catch (err) {}
+                }
+            };
+
+            const openStoreRatingModal = (st, e) => {
+                if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+                if (!st || !st.id) return;
+                haptic();
+                const existing = contractorStoreRatings[st.id] || null;
+                const isFav = favoriteStoreIds.includes(st.id);
+                setStoreRatingModal({
+                    open: true,
+                    store: st,
+                    prices: existing?.prices || 5,
+                    quality: existing?.quality || 5,
+                    delivery: existing?.delivery || 5,
+                    service: existing?.service || 5,
+                    note: existing?.note || '',
+                    addToFav: isFav || !existing,
+                    saving: false
+                });
+            };
+
+            const submitStoreCriteriaRating = async (e) => {
+                if (e && typeof e.preventDefault === 'function') e.preventDefault();
+                const st = storeRatingModal.store;
+                if (!st || !st.id || storeRatingModal.saving) return;
+                haptic();
+                const prices = Number(storeRatingModal.prices) || 5;
+                const quality = Number(storeRatingModal.quality) || 5;
+                const delivery = Number(storeRatingModal.delivery) || 5;
+                const service = Number(storeRatingModal.service) || 5;
+                const avgScore = Number(((prices + quality + delivery + service) / 4).toFixed(1));
+                const note = String(storeRatingModal.note || '').trim();
+
+                const ratingEntry = {
+                    storeId: st.id,
+                    storeName: st.name || '',
+                    prices,
+                    quality,
+                    delivery,
+                    service,
+                    avgScore,
+                    note,
+                    updatedAt: Date.now(),
+                    date: todayStr()
+                };
+
+                setStoreRatingModal(prev => ({ ...prev, saving: true }));
+                const nextRatings = { ...contractorStoreRatings, [st.id]: ratingEntry };
+                setContractorStoreRatings(nextRatings);
+                try {
+                    localStorage.setItem(`alosta_store_ratings_${adminId}`, JSON.stringify(nextRatings));
+                } catch (err) {}
+
+                let nextFavs = favoriteStoreIds;
+                if (storeRatingModal.addToFav && !favoriteStoreIds.includes(st.id)) {
+                    nextFavs = [st.id, ...favoriteStoreIds];
+                    setFavoriteStoreIds(nextFavs);
+                    try { localStorage.setItem(`alosta_fav_stores_${adminId}`, JSON.stringify(nextFavs)); } catch (err) {}
+                }
+
+                try {
+                    if (db && adminId) {
+                        await db.collection('admins').doc(adminId).set({
+                            storeRatings: nextRatings,
+                            favoriteStoreIds: nextFavs
+                        }, { merge: true });
+                    }
+                    if (db && st.id) {
+                        const hadPrev = Boolean(contractorStoreRatings[st.id]);
+                        const prevCount = Math.max(0, Number(st.ratingCount) || 0);
+                        const prevAvg = Number(st.ratingScore) || avgScore;
+                        const newCount = hadPrev ? Math.max(1, prevCount) : (prevCount + 1);
+                        const newAvg = hadPrev
+                            ? Number(((prevAvg + avgScore) / 2).toFixed(1))
+                            : Number((((prevCount * prevAvg) + avgScore) / newCount).toFixed(1));
+                        await db.collection('stores').doc(st.id).set({
+                            ratingScore: newAvg,
+                            ratingCount: newCount,
+                            criteriaScores: { prices, quality, delivery, service }
+                        }, { merge: true });
+                    }
+                } catch (err) {}
+
+                setStoreRatingModal(prev => ({ ...prev, open: false, saving: false }));
+                addToast(
+                    lang === 'ar'
+                        ? `🌟 تم حفظ تقييم معرض "${st.name}" (${avgScore} ★)${storeRatingModal.addToFav ? ' وإضافته للمفضلة ✓' : ' ✓'}`
+                        : `🌟 Saved rating for "${st.name}" (${avgScore} ★) ✓`
+                );
+            };
+
             const sortedStoresWithDist = useMemo(() => {
                 const enriched = effectiveStoresList.map(st => {
                     const productCount = effectiveProductsList.filter(p => p.storeId === st.id).length;
+                    const isFavorite = favoriteStoreIds.includes(st.id);
+                    const myRating = contractorStoreRatings[st.id] || null;
+                    const criteriaScores = {
+                        prices: Number(myRating?.prices || st.criteriaScores?.prices || st.ratingScore || 0),
+                        quality: Number(myRating?.quality || st.criteriaScores?.quality || st.ratingScore || 0),
+                        delivery: Number(myRating?.delivery || st.criteriaScores?.delivery || st.ratingScore || 0),
+                        service: Number(myRating?.service || st.criteriaScores?.service || st.ratingScore || 0)
+                    };
+                    const overallRating = Number(
+                        myRating?.avgScore ||
+                        st.ratingScore ||
+                        ((criteriaScores.prices + criteriaScores.quality + criteriaScores.delivery + criteriaScores.service) / 4) ||
+                        0
+                    );
                     return {
                         ...st,
                         productCount,
+                        isFavorite,
+                        myRating,
+                        criteriaScores,
+                        overallRating: Number(overallRating.toFixed(1)),
                         distInfo: formatDistanceInfo(st.location, activeRefCoords, lang)
                     };
                 });
                 return enriched.sort((a, b) => {
-                    if (storeSortMode === 'products') {
+                    if (storeSortMode === 'favorites') {
+                        if (a.isFavorite !== b.isFavorite) return a.isFavorite ? -1 : 1;
+                        if (b.overallRating !== a.overallRating) return b.overallRating - a.overallRating;
+                    } else if (storeSortMode === 'rating') {
+                        if (b.overallRating !== a.overallRating) return b.overallRating - a.overallRating;
+                        if (a.isFavorite !== b.isFavorite) return a.isFavorite ? -1 : 1;
+                    } else if (storeSortMode === 'crit_prices') {
+                        if (b.criteriaScores.prices !== a.criteriaScores.prices) return b.criteriaScores.prices - a.criteriaScores.prices;
+                    } else if (storeSortMode === 'crit_quality') {
+                        if (b.criteriaScores.quality !== a.criteriaScores.quality) return b.criteriaScores.quality - a.criteriaScores.quality;
+                    } else if (storeSortMode === 'crit_delivery') {
+                        if (b.criteriaScores.delivery !== a.criteriaScores.delivery) return b.criteriaScores.delivery - a.criteriaScores.delivery;
+                    } else if (storeSortMode === 'products') {
                         if (b.productCount !== a.productCount) return b.productCount - a.productCount;
                     } else if (storeSortMode === 'name') {
                         return String(a.name || '').localeCompare(String(b.name || ''), 'ar');
@@ -4754,10 +4991,12 @@
                     const dA = isFinite(a.distInfo.distMeters) ? a.distInfo.distMeters : Number.POSITIVE_INFINITY;
                     const dB = isFinite(b.distInfo.distMeters) ? b.distInfo.distMeters : Number.POSITIVE_INFINITY;
                     if (dA !== dB) return dA - dB;
+                    if (a.isFavorite !== b.isFavorite) return a.isFavorite ? -1 : 1;
+                    if (b.overallRating !== a.overallRating) return b.overallRating - a.overallRating;
                     if (b.productCount !== a.productCount) return b.productCount - a.productCount;
                     return String(a.name || '').localeCompare(String(b.name || ''), 'ar');
                 });
-            }, [effectiveStoresList, effectiveProductsList, activeRefCoords, lang, storeSortMode]);
+            }, [effectiveStoresList, effectiveProductsList, activeRefCoords, lang, storeSortMode, favoriteStoreIds, contractorStoreRatings]);
 
             // Keep prodStoreFilter locked to a single valid showroom (never 'all')
             useEffect(() => {
@@ -6508,94 +6747,138 @@
                                             {filteredHistory.length === 0 ? (
                                                 <p className="text-center text-xs text-slate-400 py-6">{tr('noData')}</p>
                                             ) : (
-                                                <div className="divide-y dark:divide-slate-700/70">
+                                                <div className="space-y-2.5">
                                                     {filteredHistory.slice(0, 40).map(h => {
                                                         const isIn = h.t === 'in';
                                                         const isAdv = h.t === 'adv';
-                                                        const label = isIn
+                                                        const rawLabel = isIn
                                                             ? (h.note || tr('receivePay'))
                                                             : isAdv
                                                                 ? `${tr('advance')}: ${h.workerName || ''}${h.note ? ' (' + h.note + ')' : ''}`
                                                                 : (h.item || tr('buyMat'));
+                                                        const hasOrderDetails = Array.isArray(h.orderDetails) && h.orderDetails.length > 0;
+                                                        const label = hasOrderDetails
+                                                            ? String(rawLabel).replace(/\s*\(\d+[^()]*×[^()]*=[^()]*\)/g, '').trim()
+                                                            : rawLabel;
                                                         const catObj = !isIn && !isAdv && h.category ? WORK_MATERIAL_CATEGORIES.find(c => c.id === h.category) : null;
+                                                        const showSettleBtn = !isIn && !isAdv && !h.paidByWorkerId && (h.fundingMode === 'credit' || h.fundingMode === 'personal') && !h.settled;
+                                                        const hasBadges = Boolean(h.fromStore || h.storeName || catObj || h.paidByWorkerName || (!h.paidByWorkerName && (h.fundingMode === 'credit' || h.fundingMode === 'personal')));
+
                                                         return (
-                                                            <div key={h.id} className="flex justify-between items-center py-2.5 text-xs font-bold gap-2">
-                                                                <div className="flex items-start gap-2.5 min-w-0 flex-1">
-                                                                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${isIn ? 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400' : isAdv ? 'bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400' : 'bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400'}`}>
-                                                                        <Icon name={isIn ? 'arrow-down' : isAdv ? 'hand-coins' : 'shopping-bag'} size={15} />
-                                                                    </div>
-                                                                    <div className="min-w-0 flex-1">
-                                                                        <div className="flex flex-wrap items-center gap-1.5">
-                                                                            {h.fromStore && (
-                                                                                <span className="text-[9px] font-black px-2 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
-                                                                                    🛍️ {lang === 'ar' ? 'مضاف تلقائياً من المتجر' : 'Store Auto-Added'}
-                                                                                </span>
-                                                                            )}
-                                                                            {h.storeName && (
-                                                                                <span className="text-[9px] font-black px-2 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
-                                                                                    🏪 {h.storeName}
-                                                                                </span>
-                                                                            )}
-                                                                            {h.paidByWorkerName && (
-                                                                                <span className="text-[9px] font-black px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
-                                                                                    👷 {lang === 'ar' ? `اشتراها العامل: ${h.paidByWorkerName} (مضافة لحسابه +)` : `Paid by worker: ${h.paidByWorkerName}`}
-                                                                                </span>
-                                                                            )}
-                                                                            {!h.paidByWorkerName && h.fundingMode === 'credit' && (
-                                                                                <span className={`text-[9px] font-black px-2 py-0.5 rounded-md border ${h.settled ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800' : 'bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800'}`}>
-                                                                                    {h.settled
-                                                                                        ? (lang === 'ar' ? '✅ كان بالآجل وتم تسديده' : '✅ Credit Settled')
-                                                                                        : (lang === 'ar' ? '⏳ شراء بالآجل (ذمة غير مسددة)' : '⏳ On Credit (Unpaid)')}
-                                                                                </span>
-                                                                            )}
-                                                                            {!h.paidByWorkerName && h.fundingMode === 'personal' && (
-                                                                                <span className={`text-[9px] font-black px-2 py-0.5 rounded-md border ${h.settled ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800' : 'bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800'}`}>
-                                                                                    {h.settled
-                                                                                        ? (lang === 'ar' ? '✅ تم استرداده لمالك الخاص' : '✅ Reimbursed')
-                                                                                        : (lang === 'ar' ? '👛 مدفوع من مالي الخاص (للاسترداد)' : '👛 Paid Out-of-Pocket')}
-                                                                                </span>
-                                                                            )}
-                                                                            <p className="text-slate-800 dark:text-slate-100 leading-snug break-words">{label}</p>
+                                                            <div key={h.id} className="p-3 rounded-2xl bg-slate-50/80 dark:bg-slate-900/50 border border-slate-200/70 dark:border-slate-700/70 text-xs font-bold space-y-2">
+                                                                {/* Top Header Row: Icon + Type/Date on Right, Amount + Delete on Left */}
+                                                                <div className="flex items-center justify-between gap-2">
+                                                                    <div className="flex items-center gap-2 min-w-0">
+                                                                        <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${isIn ? 'bg-emerald-100/80 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400' : isAdv ? 'bg-amber-100/80 dark:bg-amber-900/40 text-amber-600 dark:text-amber-400' : 'bg-rose-100/80 dark:bg-rose-900/40 text-rose-600 dark:text-rose-400'}`}>
+                                                                            <Icon name={isIn ? 'arrow-down' : isAdv ? 'hand-coins' : 'shopping-bag'} size={15} />
                                                                         </div>
-                                                                        {Array.isArray(h.orderDetails) && h.orderDetails.length > 0 && (
-                                                                            <div className="mt-1.5 bg-slate-50 dark:bg-slate-900/80 p-2 rounded-xl border border-slate-200/70 dark:border-slate-700/70 space-y-1">
-                                                                                {h.orderDetails.map((line, idx) => (
-                                                                                    <div key={idx} className="flex items-center justify-between text-[10px] font-bold text-slate-600 dark:text-slate-300 gap-2">
-                                                                                        <span className="truncate">
-                                                                                            {line.icon || '📦'} {line.name} <span className="text-indigo-600 dark:text-indigo-400">({line.qty} {line.unit || 'قطعة'})</span>
-                                                                                        </span>
-                                                                                        <span className="dir-ltr font-black text-slate-700 dark:text-slate-200 shrink-0">
-                                                                                            {line.qty} × {Number(line.unitPrice || 0).toLocaleString('en-US')} = {Number(line.lineTotal || 0).toLocaleString('en-US')} {lang === 'ar' ? 'د.ع' : 'IQD'}
-                                                                                        </span>
-                                                                                    </div>
-                                                                                ))}
-                                                                            </div>
-                                                                        )}
-                                                                        <p className="text-[10px] text-slate-400 mt-0.5">{h.date}</p>
+                                                                        <div className="min-w-0">
+                                                                            <p className="text-[10px] font-black text-slate-500 dark:text-slate-400 truncate">
+                                                                                {isIn
+                                                                                    ? (lang === 'ar' ? 'دفعة مالية مستلمة' : 'Payment Received')
+                                                                                    : isAdv
+                                                                                        ? (lang === 'ar' ? 'سلفة / دفعة عامل' : 'Worker Advance')
+                                                                                        : (lang === 'ar' ? 'فاتورة شراء مواد / مصاريف' : 'Material / Expense')}
+                                                                            </p>
+                                                                            <p className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">{h.date}</p>
+                                                                        </div>
+                                                                    </div>
+
+                                                                    <div className="flex items-center gap-1.5 shrink-0">
+                                                                        <span className={`dir-ltr font-black text-xs sm:text-sm px-2.5 py-1 rounded-xl whitespace-nowrap ${isIn ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 border border-emerald-200/60 dark:border-emerald-800/60' : isAdv ? 'bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 border border-amber-200/60 dark:border-amber-800/60' : 'bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 border border-rose-200/60 dark:border-rose-800/60'}`}>
+                                                                            {isIn ? '+' : '-'}{fmtMoney(h.amount || h.cost, lang)}
+                                                                        </span>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => deleteTransaction(h.id, isIn ? 'payments' : isAdv ? 'advances' : 'expenses')}
+                                                                            className="p-1.5 text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/30 rounded-lg shrink-0"
+                                                                        >
+                                                                            <Icon name="trash-2" size={14} />
+                                                                        </button>
                                                                     </div>
                                                                 </div>
-                                                                <div className="flex items-center gap-1.5 shrink-0">
-                                                                    {!isIn && !isAdv && !h.paidByWorkerId && (h.fundingMode === 'credit' || h.fundingMode === 'personal') && !h.settled && (
+
+                                                                {/* Full-Width Badges Row */}
+                                                                {hasBadges && (
+                                                                    <div className="flex flex-wrap items-center gap-1.5">
+                                                                        {h.fromStore && (
+                                                                            <span className="text-[10px] font-black px-2 py-0.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                                                                                🛍️ {lang === 'ar' ? 'مضاف تلقائياً من المتجر' : 'Store Auto-Added'}
+                                                                            </span>
+                                                                        )}
+                                                                        {h.storeName && (
+                                                                            <span className="text-[10px] font-black px-2 py-0.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                                                                                🏪 {h.storeName}
+                                                                            </span>
+                                                                        )}
+                                                                        {catObj && (
+                                                                            <span className="text-[10px] font-black px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+                                                                                {catObj.icon} {lang === 'ar' ? catObj.ar : catObj.en}
+                                                                            </span>
+                                                                        )}
+                                                                        {h.paidByWorkerName && (
+                                                                            <span className="text-[10px] font-black px-2 py-0.5 rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                                                                                👷 {lang === 'ar' ? `اشتراها العامل: ${h.paidByWorkerName} (مضافة لحسابه +)` : `Paid by worker: ${h.paidByWorkerName}`}
+                                                                            </span>
+                                                                        )}
+                                                                        {!h.paidByWorkerName && h.fundingMode === 'credit' && (
+                                                                            <span className={`text-[10px] font-black px-2 py-0.5 rounded-lg border ${h.settled ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800' : 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800'}`}>
+                                                                                {h.settled
+                                                                                    ? (lang === 'ar' ? '✅ كان بالآجل وتم تسديده' : '✅ Credit Settled')
+                                                                                    : (lang === 'ar' ? '⏳ شراء بالآجل (ذمة غير مسددة)' : '⏳ On Credit (Unpaid)')}
+                                                                            </span>
+                                                                        )}
+                                                                        {!h.paidByWorkerName && h.fundingMode === 'personal' && (
+                                                                            <span className={`text-[10px] font-black px-2 py-0.5 rounded-lg border ${h.settled ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800' : 'bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800'}`}>
+                                                                                {h.settled
+                                                                                    ? (lang === 'ar' ? '✅ تم استرداده لمالك الخاص' : '✅ Reimbursed')
+                                                                                    : (lang === 'ar' ? '👛 مدفوع من مالي الخاص (للاسترداد)' : '👛 Paid Out-of-Pocket')}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                )}
+
+                                                                {/* Full-Width Item Description */}
+                                                                <p className="w-full text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-black leading-relaxed break-words">
+                                                                    {label}
+                                                                </p>
+
+                                                                {/* Full-Width Itemized Order Details Breakdown */}
+                                                                {hasOrderDetails && (
+                                                                    <div className="w-full bg-white dark:bg-slate-800/90 p-2.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80 space-y-1.5">
+                                                                        {h.orderDetails.map((line, idx) => (
+                                                                            <div key={idx} className="flex flex-wrap items-center justify-between text-[11px] font-bold text-slate-700 dark:text-slate-200 gap-1.5">
+                                                                                <span className="break-words min-w-0 flex-1">
+                                                                                    {line.icon || '📦'} {line.name}{' '}
+                                                                                    <span className="text-indigo-600 dark:text-indigo-400 font-black">
+                                                                                        ({line.qty} {line.unit || 'قطعة'})
+                                                                                    </span>
+                                                                                </span>
+                                                                                <span className="dir-ltr font-black text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-900/70 px-2 py-0.5 rounded-lg text-[10px] shrink-0">
+                                                                                    {line.qty} × {Number(line.unitPrice || 0).toLocaleString('en-US')} = {Number(line.lineTotal || 0).toLocaleString('en-US')} {lang === 'ar' ? 'د.ع' : 'IQD'}
+                                                                                </span>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+
+                                                                {/* Full-Width Action Button for Settling Credit or Personal Expense */}
+                                                                {showSettleBtn && (
+                                                                    <div className="pt-1">
                                                                         <button
                                                                             type="button"
                                                                             onClick={() => openSettleExpenseModal(h)}
-                                                                            className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[9.5px] font-black shadow-xs active:scale-95 flex items-center gap-1"
+                                                                            className="w-full py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black shadow-xs active:scale-95 flex items-center justify-center gap-1.5 transition-all"
                                                                         >
                                                                             <span>💰</span>
                                                                             <span>
                                                                                 {h.fundingMode === 'credit'
-                                                                                    ? (lang === 'ar' ? 'تسديد الآجل ✓' : 'Settle ✓')
+                                                                                    ? (lang === 'ar' ? 'تسديد الآجل ✓' : 'Settle Credit ✓')
                                                                                     : (lang === 'ar' ? 'تسديد / استرداد ✓' : 'Reimburse ✓')}
                                                                             </span>
                                                                         </button>
-                                                                    )}
-                                                                    <span className={`dir-ltr font-black ${isIn ? 'text-emerald-600 dark:text-emerald-400' : isAdv ? 'text-amber-600 dark:text-amber-400' : 'text-rose-500 dark:text-rose-400'}`}>
-                                                                        {isIn ? '+' : '-'}{fmtMoney(h.amount || h.cost, lang)}
-                                                                    </span>
-                                                                    <button onClick={() => deleteTransaction(h.id, isIn ? 'payments' : isAdv ? 'advances' : 'expenses')} className="p-1.5 text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-900/20 rounded-lg">
-                                                                        <Icon name="trash-2" size={14} />
-                                                                    </button>
-                                                                </div>
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                         );
                                                     })}
@@ -6688,31 +6971,76 @@
                                     </div>
                                 </div>
 
-                                {/* Compact Work Site Bar (For Distance Calculation & Auto-Expense Assignment) */}
-                                <div className="bg-white dark:bg-slate-800 px-3.5 py-2.5 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-xs flex flex-wrap items-center justify-between gap-2">
-                                    <div className="flex items-center gap-1.5 text-[11px] font-black text-slate-700 dark:text-slate-200 shrink-0">
-                                        <Icon name="map-pin" size={14} className="text-emerald-500" />
-                                        <span>{lang === 'ar' ? 'موقع العمل للطلبية:' : 'Work Site:'}</span>
+                                {/* Dropdown Work Site & Live GPS Selector Bar (For Distance Calculation & Auto-Expense Assignment) */}
+                                <div className="bg-white dark:bg-slate-800 p-3.5 rounded-3xl border border-slate-200 dark:border-slate-700 shadow-xs space-y-2.5">
+                                    <div className="flex items-center justify-between gap-2">
+                                        <div className="flex items-center gap-1.5 text-xs font-black text-slate-800 dark:text-slate-100">
+                                            <Icon name="map-pin" size={15} className="text-emerald-500 shrink-0" />
+                                            <span>{lang === 'ar' ? 'موقع طلبية العمل وحساب قرب المعارض:' : 'Work Site & Store Proximity:'}</span>
+                                        </div>
+                                        <span className="text-[10px] font-black px-2 py-0.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800/60">
+                                            {storeRefProjId === '__LIVE_GPS__'
+                                                ? (lang === 'ar' ? '📡 حسب موقعي الحالي' : '📡 By Live GPS')
+                                                : (lang === 'ar' ? '🏗️ حسب موقع العمل' : '🏗️ By Work Site')}
+                                        </span>
                                     </div>
 
-                                    <div className="flex items-center gap-1.5 overflow-x-auto hide-scroll flex-1 justify-end">
-                                        {data.projects.map(p => {
-                                            const isSel = (storeRefProjId ? storeRefProjId === p.id : activeRefProject?.id === p.id);
-                                            return (
-                                                <button
-                                                    key={p.id}
-                                                    type="button"
-                                                    onClick={() => { haptic(); setStoreRefProjId(p.id); setOrderTargetProjId(p.id); }}
-                                                    className={`shrink-0 px-2.5 py-1.5 rounded-xl text-[11px] font-black border transition-all ${
-                                                        isSel
-                                                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
-                                                            : 'bg-slate-50 dark:bg-slate-900 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                                                    }`}
-                                                >
-                                                    🏗️ {p.title}
-                                                </button>
-                                            );
-                                        })}
+                                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                                        {/* Dropdown List to Choose Any Work Site or Current Live GPS */}
+                                        <div className="relative flex-1">
+                                            <select
+                                                value={storeRefProjId === '__LIVE_GPS__' ? '__LIVE_GPS__' : (activeRefProject?.id || '__LIVE_GPS__')}
+                                                onChange={(e) => {
+                                                    haptic();
+                                                    const val = e.target.value;
+                                                    if (val === '__LIVE_GPS__') {
+                                                        setStoreRefProjId('__LIVE_GPS__');
+                                                        setGpsLoading(true);
+                                                        requestGeolocation().then(pos => {
+                                                            setAdminLiveGps({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+                                                            addToast(lang === 'ar' ? 'تم ترتيب المعارض حسب قربها من موقعك الحالي (GPS) ✓' : 'Sorted by your current GPS location ✓');
+                                                        }).catch(() => {
+                                                            addToast(lang === 'ar' ? 'تعذر جلب الـ GPS، تأكد من تفعيل الموقع في هاتفك' : 'Could not fetch GPS');
+                                                        }).finally(() => setGpsLoading(false));
+                                                    } else {
+                                                        setStoreRefProjId(val);
+                                                        setOrderTargetProjId(val);
+                                                        const chosenProj = data.projects.find(p => p.id === val);
+                                                        if (chosenProj) {
+                                                            const hasLoc = Boolean(extractCoords(chosenProj.location));
+                                                            addToast(
+                                                                lang === 'ar'
+                                                                    ? (hasLoc
+                                                                        ? `تم تحديد موقع العمل "${chosenProj.title}" وترتيب المعارض الأقرب إليه ✓`
+                                                                        : `تم اختيار "${chosenProj.title}" (لا يوجد موقع خريطة محفوظ للمشروع، يتم الحساب من موقعك الحالي)`)
+                                                                    : `Selected "${chosenProj.title}" ✓`
+                                                            );
+                                                        }
+                                                    }
+                                                }}
+                                                className="w-full p-3 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-100 text-xs font-black outline-none focus:border-indigo-500 transition-colors"
+                                            >
+                                                {data.projects.length > 0 && (
+                                                    <optgroup label={lang === 'ar' ? '🏗️ مواقع العمل والمشاريع (لمعرفة المعارض القريبة للموقع حتى لو كنت بعيداً)' : '🏗️ Work Sites / Projects'}>
+                                                        {data.projects.map(p => {
+                                                            const hasCoords = Boolean(extractCoords(p.location));
+                                                            return (
+                                                                <option key={p.id} value={p.id}>
+                                                                    🏗️ {p.title} {hasCoords ? (lang === 'ar' ? '— (📍 المعارض الأقرب لموقع العمل)' : '— (📍 Site GPS)') : (lang === 'ar' ? '— (بدون موقع خريطة محفوظ)' : '— (No saved GPS)')}
+                                                                </option>
+                                                            );
+                                                        })}
+                                                    </optgroup>
+                                                )}
+                                                <optgroup label={lang === 'ar' ? '📡 موقعي الشخصي الآن' : '📡 My Current Location'}>
+                                                    <option value="__LIVE_GPS__">
+                                                        📍 {lang === 'ar' ? 'موقعي الحالي الآن (GPS) — عرض المعارض الأقرب لمكاني الحالي' : 'My Current GPS Location — Closest stores to me now'}
+                                                    </option>
+                                                </optgroup>
+                                            </select>
+                                        </div>
+
+                                        {/* Quick 1-Tap Button for Current Live GPS */}
                                         <button
                                             type="button"
                                             onClick={() => {
@@ -6721,25 +7049,72 @@
                                                 setGpsLoading(true);
                                                 requestGeolocation().then(pos => {
                                                     setAdminLiveGps({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-                                                    addToast(lang === 'ar' ? 'تم الترتيب حسب موقعك الحالي ✓' : 'Sorted by your live GPS ✓');
-                                                }).catch(() => {}).finally(() => setGpsLoading(false));
+                                                    addToast(lang === 'ar' ? 'تم تحديث موقعك الحالي وترتيب المعارض الأقرب إليك ✓' : 'Sorted by your live GPS ✓');
+                                                }).catch(() => {
+                                                    addToast(lang === 'ar' ? 'يرجى تفعيل خدمة الموقع (GPS) في الجهاز' : 'Please enable GPS');
+                                                }).finally(() => setGpsLoading(false));
                                             }}
-                                            className={`shrink-0 px-2.5 py-1.5 rounded-xl text-[11px] font-black flex items-center gap-1 border transition-all ${
+                                            className={`shrink-0 px-3.5 py-2.5 rounded-2xl text-xs font-black flex items-center justify-center gap-1.5 border transition-all active:scale-95 ${
                                                 storeRefProjId === '__LIVE_GPS__'
-                                                    ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
-                                                    : 'bg-slate-50 dark:bg-slate-900 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                                                    ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
+                                                    : 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/70'
                                             }`}
                                         >
-                                            <Icon name="crosshair" size={12} />
-                                            <span>{lang === 'ar' ? 'موقعي GPS' : 'Live GPS'}</span>
+                                            <Icon name="crosshair" size={14} className={gpsLoading ? 'animate-spin' : ''} />
+                                            <span>{lang === 'ar' ? '📍 موقعي الحالي (GPS)' : '📍 My Current GPS'}</span>
                                         </button>
+                                    </div>
+
+                                    {/* When searching by Current Live GPS, still allow choosing which Work Site receives the order invoice from a dropdown */}
+                                    {storeRefProjId === '__LIVE_GPS__' && data.projects.length > 0 && (
+                                        <div className="bg-emerald-50/70 dark:bg-emerald-950/30 p-2.5 rounded-2xl border border-emerald-200/80 dark:border-emerald-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                            <span className="text-[11px] font-black text-emerald-800 dark:text-emerald-300">
+                                                🏗️ {lang === 'ar' ? 'تسجيل فاتورة الطلبية على حساب موقع العمل:' : 'Assign Order Invoice to Work Site:'}
+                                            </span>
+                                            <select
+                                                value={orderTargetProjId || data.projects[0]?.id || ''}
+                                                onChange={(e) => { haptic(); setOrderTargetProjId(e.target.value); }}
+                                                className="p-2 rounded-xl bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-slate-800 dark:text-slate-100 text-xs font-black outline-none"
+                                            >
+                                                {data.projects.map(p => (
+                                                    <option key={p.id} value={p.id}>
+                                                        🏗️ {p.title}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    )}
+
+                                    {/* Clear Informative Status Line explaining how distances are currently measured */}
+                                    <div className="text-[10px] font-bold text-slate-500 dark:text-slate-400 flex items-center justify-between gap-2 pt-0.5">
+                                        {storeRefProjId === '__LIVE_GPS__' ? (
+                                            <span className="text-emerald-600 dark:text-emerald-400">
+                                                📡 {lang === 'ar'
+                                                    ? 'يتم الآن عرض وترتيب المعارض حسب قربها من موقعك الحالي (GPS).'
+                                                    : 'Showing stores sorted by distance to your current GPS location.'}
+                                            </span>
+                                        ) : activeRefProject ? (
+                                            extractCoords(activeRefProject.location) ? (
+                                                <span className="text-indigo-600 dark:text-indigo-400">
+                                                    ✅ {lang === 'ar'
+                                                        ? `يتم حساب المسافة وترتيب المعارض الأقرب إلى موقع العمل "${activeRefProject.title}" (حتى لو كنت بعيداً عن الموقع الآن).`
+                                                        : `Distances calculated from work site "${activeRefProject.title}".`}
+                                                </span>
+                                            ) : (
+                                                <span className="text-amber-600 dark:text-amber-400">
+                                                    ⚠️ {lang === 'ar'
+                                                        ? `موقع العمل "${activeRefProject.title}" ليس له إحداثيات خريطة محفوظة — يتم حساب المسافات من موقعك الحالي (GPS).`
+                                                        : `Work site "${activeRefProject.title}" has no saved coordinates — using your live GPS.`}
+                                                </span>
+                                            )
+                                        ) : null}
                                     </div>
                                 </div>
 
                                 {/* MAIN TAB: STEP 1 (CHOOSE SHOWROOM) + STEP 2 (BROWSE ITS PRODUCTS) */}
                                 {storeSubTab !== 'orders' && (
                                     <div className="space-y-3">
-                                        {/* STEP 1: SELECT ONE SHOWROOM & CLEAR SORT CONTROLS */}
+                                        {/* STEP 1: SELECT ONE SHOWROOM, QUICK-ACCESS FAVORITES & MULTI-CRITERIA RATING */}
                                         <div className="bg-white dark:bg-slate-800 p-3.5 rounded-3xl border border-slate-200 dark:border-slate-700 shadow-xs space-y-3">
                                             <div className="flex flex-wrap items-center justify-between gap-2">
                                                 <div className="flex items-center gap-2">
@@ -6748,26 +7123,30 @@
                                                     </span>
                                                     <div>
                                                         <h3 className="text-xs font-black text-slate-800 dark:text-slate-100">
-                                                            {lang === 'ar' ? 'اختر المعرض (الطلبية تُرسل لمعرض واحد فقط)' : 'Step 1: Select One Showroom'}
+                                                            {lang === 'ar' ? 'اختر المعرض (المفضلة، التقييم حسب المعايير، والوصول السريع)' : 'Step 1: Select Showroom (Favorites & Criteria)'}
                                                         </h3>
                                                     </div>
                                                 </div>
 
-                                                {/* Explicit Store Sort Bar */}
-                                                <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900 p-1 rounded-xl border border-slate-200/70 dark:border-slate-700">
-                                                    <span className="text-[10px] font-black text-slate-400 px-1.5">
-                                                        {lang === 'ar' ? 'الترتيب:' : 'Sort:'}
+                                                {/* Explicit Store Sort Bar with Favorites & Criteria */}
+                                                <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900 p-1 rounded-xl border border-slate-200/70 dark:border-slate-700 overflow-x-auto hide-scroll max-w-full">
+                                                    <span className="text-[10px] font-black text-slate-400 px-1.5 shrink-0">
+                                                        {lang === 'ar' ? 'الترتيب حسب:' : 'Sort:'}
                                                     </span>
                                                     {[
                                                         { id: 'nearest', labelAr: '📍 الأقرب', labelEn: 'Nearest' },
-                                                        { id: 'products', labelAr: '📦 الأكثر منتجات', labelEn: 'Most Items' },
-                                                        { id: 'name', labelAr: '🔤 أ-ي', labelEn: 'A-Z' }
+                                                        { id: 'favorites', labelAr: '⭐ المفضلة أولاً', labelEn: 'Favorites' },
+                                                        { id: 'rating', labelAr: '🏆 الأعلى تقييماً', labelEn: 'Top Rated' },
+                                                        { id: 'crit_prices', labelAr: '💰 الأفضل سعراً وآجلاً', labelEn: 'Best Price' },
+                                                        { id: 'crit_quality', labelAr: '💎 الأعلى جودة', labelEn: 'Best Quality' },
+                                                        { id: 'crit_delivery', labelAr: '🚚 الأسرع توصيلاً', labelEn: 'Fast Delivery' },
+                                                        { id: 'products', labelAr: '📦 الأكثر منتجات', labelEn: 'Most Items' }
                                                     ].map(sOpt => (
                                                         <button
                                                             key={sOpt.id}
                                                             type="button"
                                                             onClick={() => { haptic(); setStoreSortMode(sOpt.id); }}
-                                                            className={`px-2 py-1 rounded-lg text-[10px] font-black transition-all ${
+                                                            className={`shrink-0 px-2 py-1 rounded-lg text-[10px] font-black transition-all ${
                                                                 storeSortMode === sOpt.id
                                                                     ? 'bg-indigo-600 text-white shadow-2xs'
                                                                     : 'text-slate-600 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-slate-800'
@@ -6779,10 +7158,95 @@
                                                 </div>
                                             </div>
 
-                                            {/* Specialty Filter Chips */}
+                                            {/* Quick-Access Dropdown List & Favorite Showrooms Strip */}
+                                            {sortedStoresWithDist.length > 0 && (() => {
+                                                const favStores = sortedStoresWithDist.filter(s => s.isFavorite);
+                                                const ratedStores = sortedStoresWithDist.filter(s => !s.isFavorite && s.overallRating > 0);
+                                                const otherStores = sortedStoresWithDist.filter(s => !s.isFavorite && !(s.overallRating > 0));
+                                                return (
+                                                    <div className="bg-amber-50/60 dark:bg-amber-950/20 p-2.5 rounded-2xl border border-amber-200/80 dark:border-amber-800/50 space-y-2">
+                                                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                                            <div className="flex items-center gap-1.5 text-[11px] font-black text-amber-900 dark:text-amber-300 shrink-0">
+                                                                <span>⚡</span>
+                                                                <span>{lang === 'ar' ? 'قائمة الوصول السريع للمعارض المفضلة والمُقيّمة:' : 'Quick Access to Favorite & Rated Showrooms:'}</span>
+                                                            </div>
+                                                            <select
+                                                                value={selectedShowroom?.id || ''}
+                                                                onChange={(e) => {
+                                                                    const st = sortedStoresWithDist.find(x => x.id === e.target.value);
+                                                                    if (st) selectShowroom(st);
+                                                                }}
+                                                                className="flex-1 p-2 rounded-xl bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700/80 text-slate-800 dark:text-slate-100 text-xs font-black outline-none focus:border-amber-500"
+                                                            >
+                                                                {favStores.length > 0 && (
+                                                                    <optgroup label={lang === 'ar' ? `⭐ معارضي المفضلة للوصول السريع (${favStores.length})` : `⭐ My Favorite Showrooms (${favStores.length})`}>
+                                                                        {favStores.map(st => (
+                                                                            <option key={st.id} value={st.id}>
+                                                                                ⭐ {st.name} {st.overallRating > 0 ? `— ★ ${st.overallRating}` : ''} {isFinite(st.distInfo?.distMeters) ? `— (${st.distInfo.distText})` : ''}
+                                                                            </option>
+                                                                        ))}
+                                                                    </optgroup>
+                                                                )}
+                                                                {ratedStores.length > 0 && (
+                                                                    <optgroup label={lang === 'ar' ? `🏆 معارض مقيّمة حسب المعايير (${ratedStores.length})` : `🏆 Rated Showrooms (${ratedStores.length})`}>
+                                                                        {ratedStores.map(st => (
+                                                                            <option key={st.id} value={st.id}>
+                                                                                🏆 {st.name} — ★ {st.overallRating} {isFinite(st.distInfo?.distMeters) ? `— (${st.distInfo.distText})` : ''}
+                                                                            </option>
+                                                                        ))}
+                                                                    </optgroup>
+                                                                )}
+                                                                <optgroup label={lang === 'ar' ? `🏪 كافة المعارض المعتمدة (${sortedStoresWithDist.length})` : `🏪 All Verified Showrooms (${sortedStoresWithDist.length})`}>
+                                                                    {(otherStores.length > 0 ? otherStores : sortedStoresWithDist).map(st => (
+                                                                        <option key={st.id} value={st.id}>
+                                                                            🏪 {st.name} {st.overallRating > 0 ? `— ★ ${st.overallRating}` : ''} {isFinite(st.distInfo?.distMeters) ? `— (${st.distInfo.distText})` : ''}
+                                                                        </option>
+                                                                    ))}
+                                                                </optgroup>
+                                                            </select>
+                                                        </div>
+
+                                                        {/* 1-Tap Favorite Showrooms Pills for Instant Switching */}
+                                                        {favStores.length > 0 && (
+                                                            <div className="flex items-center gap-1.5 overflow-x-auto hide-scroll pt-0.5">
+                                                                <span className="text-[10px] font-black text-amber-700 dark:text-amber-400 shrink-0">
+                                                                    ⭐ {lang === 'ar' ? 'المفضلة:' : 'Favorites:'}
+                                                                </span>
+                                                                {favStores.map(st => {
+                                                                    const isSel = selectedShowroom?.id === st.id;
+                                                                    return (
+                                                                        <button
+                                                                            key={st.id}
+                                                                            type="button"
+                                                                            onClick={() => selectShowroom(st)}
+                                                                            className={`shrink-0 px-2.5 py-1 rounded-xl text-[11px] font-black flex items-center gap-1 border transition-all active:scale-95 ${
+                                                                                isSel
+                                                                                    ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-xs'
+                                                                                    : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border-amber-300/80 dark:border-amber-700/70'
+                                                                            }`}
+                                                                        >
+                                                                            <span>⭐</span>
+                                                                            <span>{st.name}</span>
+                                                                            {st.overallRating > 0 && (
+                                                                                <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300">
+                                                                                    ★{st.overallRating}
+                                                                                </span>
+                                                                            )}
+                                                                        </button>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            })()}
+
+                                            {/* Specialty & Favorites Filter Chips */}
                                             <div className="flex gap-1.5 overflow-x-auto hide-scroll">
                                                 {[
-                                                    { id: 'all', labelAr: 'كل التخصصات', labelEn: 'All', icon: '🏪' },
+                                                    { id: 'all', labelAr: 'كل المعارض', labelEn: 'All', icon: '🏪' },
+                                                    { id: 'favorites_only', labelAr: `المفضلة (${sortedStoresWithDist.filter(s => s.isFavorite).length})`, labelEn: `Favorites (${sortedStoresWithDist.filter(s => s.isFavorite).length})`, icon: '⭐' },
+                                                    { id: 'top_rated', labelAr: 'الأعلى تقييماً', labelEn: 'Top Rated', icon: '🏆' },
                                                     ...STORE_TYPES.map(t => ({ id: t.id, labelAr: t.shortAr, labelEn: t.shortEn, icon: t.icon }))
                                                 ].map(tab => (
                                                     <button
@@ -6791,7 +7255,7 @@
                                                         onClick={() => { haptic(); setStoreFilter(tab.id); }}
                                                         className={`shrink-0 px-2.5 py-1.5 rounded-xl text-[11px] font-black flex items-center gap-1 border transition-all ${
                                                             storeFilter === tab.id
-                                                                ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-slate-900'
+                                                                ? (tab.id === 'favorites_only' ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-xs' : 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-slate-900')
                                                                 : 'bg-slate-50 dark:bg-slate-900 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                                                         }`}
                                                     >
@@ -6805,6 +7269,8 @@
                                             {(() => {
                                                 const visibleStores = sortedStoresWithDist.filter(st => {
                                                     if (storeFilter === 'all') return true;
+                                                    if (storeFilter === 'favorites_only') return Boolean(st.isFavorite);
+                                                    if (storeFilter === 'top_rated') return st.overallRating >= 4 || Boolean(st.myRating);
                                                     if (storeFilter === 'paint_agency') {
                                                         return isPaintAgencyStore(st);
                                                     }
@@ -6815,9 +7281,9 @@
                                                     return (
                                                         <div className="bg-slate-50 dark:bg-slate-900/70 border border-dashed border-slate-300 dark:border-slate-700 rounded-2xl p-6 text-center space-y-2">
                                                             <p className="text-xs font-black text-slate-600 dark:text-slate-300">
-                                                                {lang === 'ar'
-                                                                    ? 'لا توجد معارض مضافة في هذا القسم حالياً.'
-                                                                    : 'No active showrooms found.'}
+                                                                {storeFilter === 'favorites_only'
+                                                                    ? (lang === 'ar' ? 'لم تقم بإضافة معارض إلى قائمتك المفضلة بعد — اضغط على نجمة (☆) بجانب أي معرض لإضافته.' : 'No favorite showrooms yet — tap ☆ on any showroom.')
+                                                                    : (lang === 'ar' ? 'لا توجد معارض مضافة في هذا القسم حالياً.' : 'No active showrooms found.')}
                                                             </p>
                                                             <div className="flex items-center justify-center gap-2">
                                                                 {storeFilter !== 'all' && (
@@ -6855,14 +7321,15 @@
                                                             const hasCartItems = ecomCart.length > 0 && ecomCart[0]?.storeId === st.id;
 
                                                             return (
-                                                                <button
+                                                                <div
                                                                     key={st.id}
-                                                                    type="button"
                                                                     onClick={() => selectShowroom(st)}
-                                                                    className={`shrink-0 w-60 p-3 rounded-2xl border text-right transition-all flex flex-col justify-between gap-2 active:scale-95 ${
+                                                                    className={`shrink-0 w-64 p-3 rounded-2xl border text-right transition-all flex flex-col justify-between gap-2 cursor-pointer active:scale-95 ${
                                                                         isSelected
                                                                             ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-600/20 ring-2 ring-indigo-500/30'
-                                                                            : 'bg-slate-50 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100 border-slate-200 dark:border-slate-700 hover:border-indigo-400'
+                                                                            : st.isFavorite
+                                                                                ? 'bg-amber-50/40 dark:bg-slate-900/95 text-slate-800 dark:text-slate-100 border-amber-300 dark:border-amber-700/70 hover:border-amber-400'
+                                                                                : 'bg-slate-50 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100 border-slate-200 dark:border-slate-700 hover:border-indigo-400'
                                                                     }`}
                                                                 >
                                                                     <div className="space-y-1.5 w-full">
@@ -6878,30 +7345,97 @@
                                                                                     ? `🎯 وكالة ${exclusiveBrand.shortAr}`
                                                                                     : `${stType.icon} ${lang === 'ar' ? stType.shortAr : stType.shortEn}`}
                                                                             </span>
-                                                                            {hasCartItems ? (
-                                                                                <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 shrink-0">
-                                                                                    🛒 بالسلة ({ecomCartSummary.totalQty})
-                                                                                </span>
-                                                                            ) : isClosest ? (
-                                                                                <span className={`text-[9px] font-black px-2 py-0.5 rounded-full shrink-0 ${
-                                                                                    isSelected ? 'bg-emerald-400 text-slate-950' : 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
-                                                                                }`}>
-                                                                                    🏆 الأقرب
-                                                                                </span>
-                                                                            ) : isSelected ? (
-                                                                                <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-white text-indigo-700 shrink-0">
-                                                                                    ✓ المختار
-                                                                                </span>
-                                                                            ) : null}
+
+                                                                            <div className="flex items-center gap-1 shrink-0">
+                                                                                {hasCartItems ? (
+                                                                                    <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-amber-400 text-slate-950">
+                                                                                        🛒 ({ecomCartSummary.totalQty})
+                                                                                    </span>
+                                                                                ) : isClosest ? (
+                                                                                    <span className={`text-[9px] font-black px-2 py-0.5 rounded-full ${
+                                                                                        isSelected ? 'bg-emerald-400 text-slate-950' : 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
+                                                                                    }`}>
+                                                                                        🏆 الأقرب
+                                                                                    </span>
+                                                                                ) : null}
+
+                                                                                {/* 1-Tap Favorite Star Toggle */}
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={(e) => toggleFavoriteStore(st, e)}
+                                                                                    title={lang === 'ar' ? (st.isFavorite ? 'إزالة من المفضلة' : 'إضافة للمعارض المفضلة') : 'Toggle Favorite'}
+                                                                                    className={`w-7 h-7 rounded-xl flex items-center justify-center text-sm transition-all active:scale-90 ${
+                                                                                        st.isFavorite
+                                                                                            ? 'bg-amber-400 text-slate-950 shadow-xs'
+                                                                                            : isSelected
+                                                                                                ? 'bg-white/15 text-white hover:bg-white/25'
+                                                                                                : 'bg-slate-200/70 dark:bg-slate-800 text-slate-500 dark:text-slate-400'
+                                                                                    }`}
+                                                                                >
+                                                                                    {st.isFavorite ? '⭐' : '☆'}
+                                                                                </button>
+                                                                            </div>
                                                                         </div>
 
-                                                                        <h4 className="font-black text-xs truncate">
-                                                                            {st.name}
-                                                                        </h4>
+                                                                        <div className="flex items-center justify-between gap-1.5">
+                                                                            <h4 className="font-black text-xs truncate">
+                                                                                {st.name}
+                                                                            </h4>
+                                                                            {st.overallRating > 0 && (
+                                                                                <span className={`text-[10px] font-black px-1.5 py-0.5 rounded-lg shrink-0 ${
+                                                                                    isSelected
+                                                                                        ? 'bg-amber-300 text-slate-950'
+                                                                                        : 'bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300'
+                                                                                }`}>
+                                                                                    ★ {st.overallRating}
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
 
                                                                         {st.address && (
                                                                             <p className={`text-[10px] font-bold truncate ${isSelected ? 'text-indigo-100' : 'text-slate-500 dark:text-slate-400'}`}>
                                                                                 📍 {st.governorate ? `${st.governorate} - ` : ''}{st.address}
+                                                                            </p>
+                                                                        )}
+
+                                                                        {/* Multi-Criteria Badges or Rate Showroom Button */}
+                                                                        {(st.myRating || st.overallRating > 0) ? (
+                                                                            <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                                                                                <span className={`text-[9px] font-black px-1.5 py-0.5 rounded ${isSelected ? 'bg-white/15 text-white' : 'bg-slate-200/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300'}`}>
+                                                                                    💰{st.criteriaScores.prices || st.overallRating}
+                                                                                </span>
+                                                                                <span className={`text-[9px] font-black px-1.5 py-0.5 rounded ${isSelected ? 'bg-white/15 text-white' : 'bg-slate-200/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300'}`}>
+                                                                                    💎{st.criteriaScores.quality || st.overallRating}
+                                                                                </span>
+                                                                                <span className={`text-[9px] font-black px-1.5 py-0.5 rounded ${isSelected ? 'bg-white/15 text-white' : 'bg-slate-200/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300'}`}>
+                                                                                    🚚{st.criteriaScores.delivery || st.overallRating}
+                                                                                </span>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={(e) => openStoreRatingModal(st, e)}
+                                                                                    className={`text-[9px] font-black px-1.5 py-0.5 rounded underline ${isSelected ? 'text-amber-200' : 'text-indigo-600 dark:text-indigo-400'}`}
+                                                                                >
+                                                                                    {lang === 'ar' ? 'تعديل التقييم' : 'Edit'}
+                                                                                </button>
+                                                                            </div>
+                                                                        ) : (
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={(e) => openStoreRatingModal(st, e)}
+                                                                                className={`text-[9.5px] font-black px-2 py-0.5 rounded-lg inline-flex items-center gap-1 ${
+                                                                                    isSelected
+                                                                                        ? 'bg-white/20 text-amber-200'
+                                                                                        : 'bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-200/70 dark:border-amber-800/60'
+                                                                                }`}
+                                                                            >
+                                                                                <span>🌟</span>
+                                                                                <span>{lang === 'ar' ? 'تقييم المعرض حسب المعايير' : 'Rate Showroom'}</span>
+                                                                            </button>
+                                                                        )}
+
+                                                                        {st.myRating?.note && (
+                                                                            <p className={`text-[9.5px] font-bold truncate ${isSelected ? 'text-amber-200' : 'text-amber-700 dark:text-amber-300'}`}>
+                                                                                📝 {st.myRating.note}
                                                                             </p>
                                                                         )}
                                                                     </div>
@@ -6920,14 +7454,14 @@
                                                                             <span>{st.delivery !== false ? '🚚 توصيل' : ''}</span>
                                                                         )}
                                                                     </div>
-                                                                </button>
+                                                                </div>
                                                             );
                                                         })}
                                                     </div>
                                                 );
                                             })()}
 
-                                            {/* Selected Showroom Quick Actions, Payment Barcode & Exclusive Paint Agency Catalog Strip */}
+                                            {/* Selected Showroom Quick Actions, Favorite & Rating Controls, Payment Barcode & Exclusive Paint Agency Catalog Strip */}
                                             {selectedShowroom && (() => {
                                                 const sCoords = extractCoords(selectedShowroom.location);
                                                 const directStoreUrl = selectedShowroom.location?.url || extractUrlFromText(selectedShowroom.location?.raw || '');
@@ -6955,6 +7489,11 @@
                                                                         <span className="font-black text-xs text-slate-800 dark:text-slate-100 truncate">
                                                                             {selectedShowroom.name}
                                                                         </span>
+                                                                        {selectedShowroom.overallRating > 0 && (
+                                                                            <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300">
+                                                                                ★ {selectedShowroom.overallRating}
+                                                                            </span>
+                                                                        )}
                                                                         {exclusiveBrand && (
                                                                             <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-fuchsia-100 dark:bg-fuchsia-950/70 text-fuchsia-700 dark:text-fuchsia-300">
                                                                                 🎯 وكالة {exclusiveBrand.shortAr}
@@ -6975,6 +7514,30 @@
                                                             </div>
 
                                                             <div className="flex items-center gap-1.5 flex-wrap">
+                                                                {/* Toggle Favorite Button */}
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={(e) => toggleFavoriteStore(selectedShowroom, e)}
+                                                                    className={`px-2.5 py-1.5 rounded-xl text-[10px] font-black flex items-center gap-1 border active:scale-95 transition-all ${
+                                                                        selectedShowroom.isFavorite
+                                                                            ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-xs'
+                                                                            : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700'
+                                                                    }`}
+                                                                >
+                                                                    <span>{selectedShowroom.isFavorite ? '⭐' : '☆'}</span>
+                                                                    <span>{selectedShowroom.isFavorite ? (lang === 'ar' ? 'بالمفضلة' : 'Favorited') : (lang === 'ar' ? 'للمفضلة' : 'Favorite')}</span>
+                                                                </button>
+
+                                                                {/* Rate Showroom by Criteria Button */}
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={(e) => openStoreRatingModal(selectedShowroom, e)}
+                                                                    className="px-2.5 py-1.5 bg-amber-50 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800 rounded-xl text-[10px] font-black flex items-center gap-1 active:scale-95"
+                                                                >
+                                                                    <span>🌟</span>
+                                                                    <span>{lang === 'ar' ? 'تقييم المعرض' : 'Rate'}</span>
+                                                                </button>
+
                                                                 {(accNum || qrSrc) && (
                                                                     <button
                                                                         type="button"
@@ -9350,30 +9913,73 @@
                         title={lang === 'ar' ? 'شراء من المتجر وإضافة تلقائية لموقع العمل' : 'Store Purchase & Auto-Add to Site'}
                     >
                         <form onSubmit={handleSaveStoreOrder} className="space-y-3.5">
-                            {/* 1. Select Target Work Site Inside Store */}
+                            {/* 1. Select Target Work Site Inside Store via Dropdown List + Proximity Reference */}
                             {data.projects.length > 0 && (
-                                <div className="bg-indigo-50/70 dark:bg-indigo-950/35 p-3 rounded-2xl border border-indigo-200 dark:border-indigo-800">
-                                    <p className="text-[11px] font-black text-indigo-800 dark:text-indigo-300 mb-2 flex items-center justify-between">
-                                        <span>🏗️ {lang === 'ar' ? 'اختر موقع العمل (تُضاف الفاتورة والأسعار داخله تلقائياً):' : 'Select Work Site (Auto-Added):'}</span>
-                                    </p>
-                                    <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
+                                <div className="bg-indigo-50/70 dark:bg-indigo-950/35 p-3 rounded-2xl border border-indigo-200 dark:border-indigo-800 space-y-2">
+                                    <label className="text-[11px] font-black text-indigo-800 dark:text-indigo-300 block">
+                                        🏗️ {lang === 'ar' ? 'اختر موقع العمل للطلبية من القائمة المنسدلة (تُضاف الفاتورة والأسعار داخله تلقائياً):' : 'Select Work Site for Order (Auto-Added):'}
+                                    </label>
+                                    <select
+                                        value={orderTargetProjId || activeRefProject?.id || data.projects[0]?.id || ''}
+                                        onChange={(e) => {
+                                            haptic();
+                                            const val = e.target.value;
+                                            setOrderTargetProjId(val);
+                                            if (storeRefProjId !== '__LIVE_GPS__') {
+                                                setStoreRefProjId(val);
+                                            }
+                                        }}
+                                        className="w-full p-2.5 rounded-xl bg-white dark:bg-slate-800 border border-indigo-300 dark:border-indigo-700 text-slate-800 dark:text-slate-100 text-xs font-black outline-none focus:border-indigo-600"
+                                    >
                                         {data.projects.map(p => {
-                                            const isSel = (orderTargetProjId || activeRefProject?.id) === p.id;
+                                            const hasCoords = Boolean(extractCoords(p.location));
                                             return (
-                                                <button
-                                                    key={p.id}
-                                                    type="button"
-                                                    onClick={() => { haptic(); setOrderTargetProjId(p.id); setStoreRefProjId(p.id); }}
-                                                    className={`px-3 py-2 rounded-xl text-xs font-black whitespace-nowrap border transition-all active:scale-95 ${
-                                                        isSel
-                                                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
-                                                            : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                                                    }`}
-                                                >
-                                                    🏗️ {p.title}
-                                                </button>
+                                                <option key={p.id} value={p.id}>
+                                                    🏗️ {p.title} {hasCoords ? (lang === 'ar' ? '— (📍 موقع مثبت على الخريطة)' : '— (📍 Saved GPS)') : ''}
+                                                </option>
                                             );
                                         })}
+                                    </select>
+
+                                    <div className="flex items-center justify-between gap-2 pt-1">
+                                        <span className="text-[10px] font-black text-slate-600 dark:text-slate-300">
+                                            📐 {lang === 'ar' ? 'حساب قرب المعرض حسب:' : 'Distance Reference:'}
+                                        </span>
+                                        <div className="flex items-center gap-1.5">
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    haptic();
+                                                    const targetId = orderTargetProjId || activeRefProject?.id || data.projects[0]?.id || '';
+                                                    if (targetId) setStoreRefProjId(targetId);
+                                                }}
+                                                className={`px-2.5 py-1 rounded-lg text-[10px] font-black border transition-all ${
+                                                    storeRefProjId !== '__LIVE_GPS__'
+                                                        ? 'bg-indigo-600 text-white border-indigo-600'
+                                                        : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                                                }`}
+                                            >
+                                                🏗️ {lang === 'ar' ? 'موقع العمل المختار' : 'Selected Site'}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    haptic();
+                                                    setStoreRefProjId('__LIVE_GPS__');
+                                                    setGpsLoading(true);
+                                                    requestGeolocation().then(pos => {
+                                                        setAdminLiveGps({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+                                                    }).catch(() => {}).finally(() => setGpsLoading(false));
+                                                }}
+                                                className={`px-2.5 py-1 rounded-lg text-[10px] font-black border transition-all ${
+                                                    storeRefProjId === '__LIVE_GPS__'
+                                                        ? 'bg-emerald-600 text-white border-emerald-600'
+                                                        : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                                                }`}
+                                            >
+                                                📍 {lang === 'ar' ? 'موقعي الحالي (GPS)' : 'My Live GPS'}
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             )}
@@ -9390,7 +9996,7 @@
                                         </div>
                                         {isFinite(dInfo.distMeters) && (
                                             <span className="text-[10px] font-black bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 px-2 py-0.5 rounded-md shrink-0">
-                                                📍 {dInfo.distText}
+                                                📍 {dInfo.distText} {storeRefProjId === '__LIVE_GPS__' ? (lang === 'ar' ? '(عن موقعك)' : '(from you)') : (lang === 'ar' ? '(عن موقع العمل)' : '(from site)')}
                                             </span>
                                         )}
                                     </div>
@@ -9677,6 +10283,178 @@
                                 </button>
                             </div>
                         </form>
+                    </Modal>
+
+                    {/* Multi-Criteria Showroom Evaluation & Favorite Modal */}
+                    <Modal
+                        isOpen={storeRatingModal.open && Boolean(storeRatingModal.store)}
+                        onClose={() => setStoreRatingModal(prev => ({ ...prev, open: false }))}
+                        zIndexClass="z-[910]"
+                        title={lang === 'ar' ? `تقييم المعرض حسب المعايير وإضافته للمفضلة 🌟` : `Rate Showroom by Criteria 🌟`}
+                    >
+                        {storeRatingModal.store && (() => {
+                            const liveAvg = Number(((
+                                (Number(storeRatingModal.prices) || 5) +
+                                (Number(storeRatingModal.quality) || 5) +
+                                (Number(storeRatingModal.delivery) || 5) +
+                                (Number(storeRatingModal.service) || 5)
+                            ) / 4).toFixed(1));
+                            const criteriaList = [
+                                {
+                                    key: 'prices',
+                                    icon: '💰',
+                                    titleAr: 'الأسعار وتسهيلات الدفع والآجل',
+                                    titleEn: 'Prices & Credit Flexibility',
+                                    descAr: 'مناسبة الأسعار وتعاون المعرض في الدفع الآجل'
+                                },
+                                {
+                                    key: 'quality',
+                                    icon: '💎',
+                                    titleAr: 'جودة وأصالة المواد والكتالوج',
+                                    titleEn: 'Material Quality & Authenticity',
+                                    descAr: 'أصالة الأصباغ والجبس وتطابق أكواد الألوان'
+                                },
+                                {
+                                    key: 'delivery',
+                                    icon: '🚚',
+                                    titleAr: 'سرعة التجهيز والتوصيل لموقع العمل',
+                                    titleEn: 'Preparation & Delivery Speed',
+                                    descAr: 'الالتزام بالوقت وسرعة إيصال الطلبية للموقع'
+                                },
+                                {
+                                    key: 'service',
+                                    icon: '🤝',
+                                    titleAr: 'حسن التعامل وسرعة التجاوب',
+                                    titleEn: 'Service & Responsiveness',
+                                    descAr: 'سرعة الرد عبر الواتساب والهاتف والتعاون مع المقاول'
+                                }
+                            ];
+
+                            return (
+                                <form onSubmit={submitStoreCriteriaRating} className="space-y-3.5">
+                                    <div className="bg-gradient-to-l from-indigo-950 via-slate-900 to-indigo-950 text-white p-3.5 rounded-2xl border border-indigo-500/30 flex items-center justify-between gap-2">
+                                        <div className="min-w-0">
+                                            <span className="text-[10px] font-black text-amber-300 block">
+                                                🏪 {lang === 'ar' ? 'المعرض المختار للتقييم:' : 'Showroom:'}
+                                            </span>
+                                            <h4 className="text-sm font-black truncate">{storeRatingModal.store.name}</h4>
+                                        </div>
+                                        <div className="bg-amber-400 text-slate-950 px-3 py-1.5 rounded-xl font-black text-sm shrink-0 flex items-center gap-1 shadow">
+                                            <span>★</span>
+                                            <span>{liveAvg} / 5</span>
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-2.5">
+                                        {criteriaList.map(c => {
+                                            const currentVal = Number(storeRatingModal[c.key]) || 5;
+                                            return (
+                                                <div key={c.key} className="bg-slate-50 dark:bg-slate-900 p-3 rounded-2xl border border-slate-200 dark:border-slate-700 space-y-1.5">
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <div>
+                                                            <p className="text-xs font-black text-slate-800 dark:text-slate-100">
+                                                                {c.icon} {lang === 'ar' ? c.titleAr : c.titleEn}
+                                                            </p>
+                                                            <p className="text-[10px] font-bold text-slate-500 dark:text-slate-400">
+                                                                {c.descAr}
+                                                            </p>
+                                                        </div>
+                                                        <span className="text-xs font-black text-amber-600 dark:text-amber-400 shrink-0">
+                                                            {currentVal} / 5 ★
+                                                        </span>
+                                                    </div>
+                                                    <div className="grid grid-cols-5 gap-1.5 pt-1 dir-ltr">
+                                                        {[1, 2, 3, 4, 5].map(star => (
+                                                            <button
+                                                                key={star}
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    haptic();
+                                                                    setStoreRatingModal(prev => ({ ...prev, [c.key]: star }));
+                                                                }}
+                                                                className={`py-1.5 rounded-xl font-black text-xs border transition-all active:scale-95 ${
+                                                                    star <= currentVal
+                                                                        ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-2xs'
+                                                                        : 'bg-white dark:bg-slate-800 text-slate-400 border-slate-200 dark:border-slate-700'
+                                                                }`}
+                                                            >
+                                                                {star} ★
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* Quick Note Presets + Custom Note */}
+                                    <div className="space-y-1.5">
+                                        <label className="text-[11px] font-black text-slate-600 dark:text-slate-300 block">
+                                            📝 {lang === 'ar' ? 'ملاحظة خاصة لك عن المعرض (تظهر لك في البطاقة للوصول السريع):' : 'Personal Note on Showroom:'}
+                                        </label>
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {[
+                                                '💰 يتعامل بالآجل وأسعاره ممتازة',
+                                                '🚚 توصيل سريع لموقع العمل',
+                                                '💎 مواد أصلية ووكالة معتمدة',
+                                                '🤝 تعامل راقٍ وتجاوب سريع'
+                                            ].map(preset => (
+                                                <button
+                                                    key={preset}
+                                                    type="button"
+                                                    onClick={() => {
+                                                        haptic();
+                                                        setStoreRatingModal(prev => ({ ...prev, note: preset }));
+                                                    }}
+                                                    className="px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-50 text-slate-700 dark:text-slate-300 text-[10px] font-black border border-slate-200 dark:border-slate-700"
+                                                >
+                                                    {preset}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        <input
+                                            type="text"
+                                            value={storeRatingModal.note}
+                                            onChange={e => setStoreRatingModal(prev => ({ ...prev, note: e.target.value }))}
+                                            placeholder={lang === 'ar' ? 'اكتب ملاحظة خاصة عن المعرض (اختياري)...' : 'Optional note...'}
+                                            className="w-full p-3 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-bold outline-none"
+                                        />
+                                    </div>
+
+                                    {/* Add to Favorites Checkbox Button */}
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            haptic();
+                                            setStoreRatingModal(prev => ({ ...prev, addToFav: !prev.addToFav }));
+                                        }}
+                                        className={`w-full p-3 rounded-2xl border text-xs font-black flex items-center justify-between transition-all ${
+                                            storeRatingModal.addToFav
+                                                ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-400 text-amber-900 dark:text-amber-300'
+                                                : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                                        }`}
+                                    >
+                                        <span className="flex items-center gap-2">
+                                            <span>{storeRatingModal.addToFav ? '⭐' : '☆'}</span>
+                                            <span>{lang === 'ar' ? 'إضافة المعرض إلى قائمة «معارضي المفضلة» للوصول السريع' : 'Add to My Favorite Showrooms for Quick Access'}</span>
+                                        </span>
+                                        <span className={`px-2 py-0.5 rounded-lg text-[10px] ${storeRatingModal.addToFav ? 'bg-amber-400 text-slate-950' : 'bg-slate-200 dark:bg-slate-800 text-slate-500'}`}>
+                                            {storeRatingModal.addToFav ? (lang === 'ar' ? 'نعم ✓' : 'Yes ✓') : (lang === 'ar' ? 'لا' : 'No')}
+                                        </span>
+                                    </button>
+
+                                    <button
+                                        type="submit"
+                                        disabled={storeRatingModal.saving}
+                                        className="w-full py-3.5 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs shadow-lg active:scale-95 transition-all"
+                                    >
+                                        {storeRatingModal.saving
+                                            ? (lang === 'ar' ? 'جاري الحفظ...' : 'Saving...')
+                                            : (lang === 'ar' ? `حفظ تقييم المعرض (${liveAvg} ★) ✓` : `Save Rating (${liveAvg} ★) ✓`)}
+                                    </button>
+                                </form>
+                            );
+                        })()}
                     </Modal>
 
                     {/* Top-Layer Enlarged Store Payment Barcode & Account Modal (z-[900] above Store Modal) */}
@@ -13060,19 +13838,17 @@
 
             useEffect(() => {
                 window.__triggerManualApkUpdate = () => {
+                    const status = window.__ALOSTA_UPDATE_STATUS;
+                    if (!status || !status.available) {
+                        setUpdateData(null);
+                        setDlState('idle');
+                        return;
+                    }
                     localStorage.removeItem('installed_server_version');
                     localStorage.removeItem('skipped_update_version');
                     if (latestConfigRef && (latestConfigRef.apkUrl || latestConfigRef.rawApkUrl)) {
                         setDlState('idle');
                         setUpdateData({ ...latestConfigRef, latestVersion: latestConfigRef.latestVersion || APP_VERSION });
-                    } else if (db) {
-                        db.collection('settings').doc('app_config').get().then(doc => {
-                            if (doc.exists) {
-                                const cfg = doc.data() || {};
-                                setDlState('idle');
-                                setUpdateData({ ...cfg, latestVersion: cfg.latestVersion || APP_VERSION });
-                            }
-                        }).catch(() => {});
                     }
                 };
                 return () => {
@@ -13092,11 +13868,7 @@
                             try { localStorage.setItem("alosta_portal_base_url", window.__DYNAMIC_PORTAL_BASE_URL); } catch (e) {}
                         }
                         setIsMaintenance(Boolean(config.maintenanceMode));
-                        if (config.stopUpdate || !window.AndroidApp) {
-                            setUpdateData(null);
-                            setDlState('idle');
-                            return;
-                        }
+
                         let pkgInfo = {};
                         try {
                             if (window.AndroidApp && typeof window.AndroidApp.getAppPackageInfo === 'function') {
@@ -13119,7 +13891,7 @@
                             pushTs > 0 && (
                                 (installedUpdateTs > 0 && installedUpdateTs >= pushTs) ||
                                 (buildTimeTs > 0 && buildTimeTs >= pushTs) ||
-                                (pushTargetVer && isServerVersionNewer(effectiveCurrentVer, pushTargetVer))
+                                (pushTargetVer && !isServerVersionNewer(pushTargetVer, effectiveCurrentVer))
                             )
                         );
                         if (alreadySatisfiedByInstall && pushToken) {
@@ -13127,9 +13899,25 @@
                         }
 
                         const hasNewerVersion = Boolean(serverVer && isServerVersionNewer(serverVer, effectiveCurrentVer) && hasApkLink);
-                        const isPushed = Boolean(pushToken && pushToken !== ackedToken && hasApkLink && !alreadySatisfiedByInstall);
+                        const isPushed = Boolean(pushToken && pushToken !== ackedToken && hasApkLink && !alreadySatisfiedByInstall && isServerVersionNewer(pushTargetVer || serverVer, effectiveCurrentVer));
+                        const isUpdateAvailable = Boolean(!config.stopUpdate && (hasNewerVersion || isPushed));
 
-                        if (hasNewerVersion || isPushed) {
+                        window.__ALOSTA_UPDATE_STATUS = {
+                            available: isUpdateAvailable,
+                            serverVer: serverVer || effectiveCurrentVer,
+                            currentVer: effectiveCurrentVer
+                        };
+                        try {
+                            window.dispatchEvent(new CustomEvent('alosta-update-status-changed', { detail: window.__ALOSTA_UPDATE_STATUS }));
+                        } catch (e) {}
+
+                        if (config.stopUpdate || !window.AndroidApp) {
+                            setUpdateData(null);
+                            setDlState('idle');
+                            return;
+                        }
+
+                        if (isUpdateAvailable) {
                             if (!config.forceUpdate && !isPushed && serverVer === skippedVersion) {
                                 setUpdateData(null);
                             } else {
@@ -13470,7 +14258,7 @@
         };
         ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     </script>
-    <script src="./vendor/app-compiled.js?v=20261117_111"></script>
+    <script src="./vendor/app-compiled.js?v=20261119_115"></script>
 </body>
 
 </html>

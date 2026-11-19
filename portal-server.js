@@ -19,6 +19,7 @@ const MIME_TYPES = {
   '.ico': 'image/x-icon',
   '.webp': 'image/webp',
   '.webmanifest': 'application/manifest+json',
+  '.mp4': 'video/mp4',
   '.apk': 'application/vnd.android.package-archive'
 };
 
@@ -97,17 +98,47 @@ const server = http.createServer((req, res) => {
       return;
     }
 
-    if (pathname.toLowerCase().endsWith('.apk')) {
-      const apkName = path.basename(pathname);
-      const rootApkPath = path.join(__dirname, apkName);
-      if (fs.existsSync(rootApkPath)) {
-        const stat = fs.statSync(rootApkPath);
+    if (pathname === '/contractor-video.html') {
+      const extVideoPage = path.join(__dirname, 'contractor-video.html');
+      if (fs.existsSync(extVideoPage)) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        fs.createReadStream(extVideoPage).pipe(res);
+        return;
+      }
+    }
+
+    if (pathname.toLowerCase().endsWith('.apk') || pathname.toLowerCase().endsWith('.mp4')) {
+      const fileName = path.basename(pathname);
+      const isMp4 = fileName.toLowerCase().endsWith('.mp4');
+      let targetFilePath = path.join(__dirname, fileName);
+      if (!fs.existsSync(targetFilePath)) {
+        targetFilePath = path.join(ASSETS_DIR, fileName);
+      }
+      if (fs.existsSync(targetFilePath)) {
+        const stat = fs.statSync(targetFilePath);
+        const mime = isMp4 ? 'video/mp4' : 'application/vnd.android.package-archive';
+        const range = req.headers.range;
+        if (isMp4 && range) {
+          const parts = range.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10) || 0;
+          const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+          const chunkSize = (end - start) + 1;
+          res.writeHead(206, {
+            'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+            'Accept-Ranges': 'bytes',
+            'Content-Length': chunkSize,
+            'Content-Type': mime
+          });
+          fs.createReadStream(targetFilePath, { start, end }).pipe(res);
+          return;
+        }
         res.writeHead(200, {
-          'Content-Type': 'application/vnd.android.package-archive',
+          'Content-Type': mime,
           'Content-Length': stat.size,
-          'Content-Disposition': `attachment; filename="${apkName}"`
+          'Accept-Ranges': 'bytes',
+          ...(parsedUrl.query && parsedUrl.query.download ? { 'Content-Disposition': `attachment; filename="${fileName}"` } : (!isMp4 ? { 'Content-Disposition': `attachment; filename="${fileName}"` } : {}))
         });
-        fs.createReadStream(rootApkPath).pipe(res);
+        fs.createReadStream(targetFilePath).pipe(res);
         return;
       }
     }

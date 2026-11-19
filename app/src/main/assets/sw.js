@@ -1,4 +1,4 @@
-const CACHE_NAME = 'alosta-pwa-v1011';
+const CACHE_NAME = 'alosta-pwa-v1015';
 const CORE_SHELL = [
   './vendor/react.production.min.js',
   './vendor/react-dom.production.min.js',
@@ -8,7 +8,7 @@ const CORE_SHELL = [
   './vendor/firebase-auth.js',
   './vendor/firebase-firestore.js',
   './vendor/lucide.min.js',
-  './vendor/app-compiled.js?v=20261117_111',
+  './vendor/app-compiled.js?v=20261119_115',
   './apple-touch-icon.png',
   './app-icon-192.png',
   './app-icon-512.png'
@@ -37,6 +37,7 @@ self.addEventListener('fetch', (event) => {
     url.includes('firestore.googleapis.com') ||
     url.includes('identitytoolkit.googleapis.com') ||
     url.includes('.apk') ||
+    url.includes('.mp4') ||
     url.includes('__portal_status')
   ) {
     return;
