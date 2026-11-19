@@ -41,8 +41,8 @@ async function updateFirestorePortalUrl(tunnelUrl) {
           apkUrl: { stringValue: apkDirectUrl },
           rawApkUrl: { stringValue: apkDirectUrl },
           dashboardApkUrl: { stringValue: dashApkDirectUrl },
-          latestVersion: { stringValue: '1.0.10' },
-          latestDashboardVersion: { stringValue: '1.0.10' },
+          latestVersion: { stringValue: '1.0.12' },
+          latestDashboardVersion: { stringValue: '1.0.12' },
           forceUpdate: { booleanValue: true },
           stopUpdate: { booleanValue: false },
           pushUpdateToken: { stringValue: '' },
@@ -51,7 +51,7 @@ async function updateFirestorePortalUrl(tunnelUrl) {
       })
     });
     if (res.ok) {
-      console.log('Synced public portalBaseUrl & apkUrl (v1.0.10) to Firestore:', apkDirectUrl);
+      console.log('Synced public portalBaseUrl & apkUrl (v1.0.12) to Firestore:', apkDirectUrl);
     }
   } catch (err) {
     console.error('Failed to sync portalBaseUrl:', err.message);
@@ -111,6 +111,9 @@ const server = http.createServer((req, res) => {
       const fileName = path.basename(pathname);
       const isMp4 = fileName.toLowerCase().endsWith('.mp4');
       let targetFilePath = path.join(__dirname, fileName);
+      if (!fs.existsSync(targetFilePath)) {
+        targetFilePath = path.join(__dirname, '.portal', fileName);
+      }
       if (!fs.existsSync(targetFilePath)) {
         targetFilePath = path.join(ASSETS_DIR, fileName);
       }

@@ -476,7 +476,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.11";
+        const APP_VERSION = "1.0.12";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -4396,6 +4396,8 @@
             const [selectedDate, setSelectedDate] = useState(todayStr());
             const [search, setSearch] = useState('');
             const [ledgerFilter, setLedgerFilter] = useState('all');
+            const [ledgerMonthFilter, setLedgerMonthFilter] = useState('all');
+            const [ledgerPageLimit, setLedgerPageLimit] = useState(40);
             const [marketSearch, setMarketSearch] = useState('');
             const [marketFilter, setMarketFilter] = useState('الكل');
             const [marketGovFilter, setMarketGovFilter] = useState('الكل');
@@ -5555,14 +5557,28 @@
                 }
             }, [selectedProject?.id, focusedProj?.id, data.projects]);
 
+            const indexedLedger = useMemo(() => {
+                if (window.AlOstaLedgerEngine && typeof window.AlOstaLedgerEngine.buildIndexedLedger === 'function') {
+                    return window.AlOstaLedgerEngine.buildIndexedLedger(
+                        data,
+                        resolveAttendanceOwnerProjectId,
+                        getOfficialWorkerWage,
+                        calcWage
+                    );
+                }
+                return null;
+            }, [data]);
+
             const computeProjectStatsFor = (pId) => {
+                if (indexedLedger) {
+                    return indexedLedger.computeForProject(pId);
+                }
                 const activeProj = pId ? data.projects.find(p => p.id === pId) : null;
                 const fPay = data.payments.filter(x => pId ? x.projectId === pId : true);
                 const fExp = data.expenses.filter(x => pId ? x.projectId === pId : true);
                 const fAdv = data.advances.filter(x => pId ? x.projectId === pId : true);
                 const wIds = pId ? (activeProj?.workerIds || []) : data.workers.map(x => x.id);
 
-                // Strictly match each attendance record to its single owning project so wages never duplicate across projects
                 const fAtt = data.attendance.filter(a => {
                     if (!pId) return wIds.includes(a.workerId);
                     const ownerProjId = resolveAttendanceOwnerProjectId(a, data.projects);
@@ -5597,14 +5613,14 @@
                 const autoDeficitPersonal = rawBoxBalance < 0 ? Math.abs(rawBoxBalance) : 0;
                 const outOfPocketAmt = explicitPersonalMat + autoDeficitPersonal;
                 const history = [
-                    ...fPay.map(x => ({ ...x, t: 'in' })),
-                    ...fExp.map(x => ({ ...x, t: 'out' })),
+                    ...fPay.map(x => ({ ...x, t: 'in', monthKey: String(x.date || '').slice(0, 7) })),
+                    ...fExp.map(x => ({ ...x, t: 'out', monthKey: String(x.date || '').slice(0, 7) })),
                     ...fAdv.map(x => {
                         const wk = data.workers.find(w => w.id === x.workerId);
-                        return { ...x, t: 'adv', workerName: wk ? wk.name : (x.workerName || '') };
+                        return { ...x, t: 'adv', workerName: wk ? wk.name : (x.workerName || ''), monthKey: String(x.date || '').slice(0, 7) };
                     })
                 ].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-                return { contract, inAmt, matCost, wageCost, advCost, cashInHand, rawBoxBalance, explicitPersonalMat, outOfPocketAmt, unsettledCreditMat, unsettledWorkerMat, totalCost, profit: contract - totalCost, history };
+                return { contract, inAmt, matCost, wageCost, advCost, cashInHand, rawBoxBalance, explicitPersonalMat, outOfPocketAmt, unsettledCreditMat, unsettledWorkerMat, totalCost, profit: contract - totalCost, history, monthlySummaries: [] };
             };
 
             const stats = useMemo(() => {
@@ -5612,9 +5628,9 @@
                     const activeProj = selectedProject || focusedProj;
                     return computeProjectStatsFor(activeProj?.id || null);
                 } catch (e) {
-                    return { contract: 0, inAmt: 0, matCost: 0, wageCost: 0, advCost: 0, cashInHand: 0, rawBoxBalance: 0, explicitPersonalMat: 0, outOfPocketAmt: 0, unsettledCreditMat: 0, unsettledWorkerMat: 0, totalCost: 0, profit: 0, history: [] };
+                    return { contract: 0, inAmt: 0, matCost: 0, wageCost: 0, advCost: 0, cashInHand: 0, rawBoxBalance: 0, explicitPersonalMat: 0, outOfPocketAmt: 0, unsettledCreditMat: 0, unsettledWorkerMat: 0, totalCost: 0, profit: 0, history: [], monthlySummaries: [] };
                 }
-            }, [selectedProject, focusedProj, data]);
+            }, [selectedProject, focusedProj, indexedLedger, data]);
 
             const openSettleExpenseModal = (expItem) => {
                 if (!expItem) return;
@@ -6342,9 +6358,42 @@
             };
 
             const filteredHistory = useMemo(() => {
-                if (ledgerFilter === 'all') return stats.history;
-                return stats.history.filter(h => h.t === ledgerFilter);
-            }, [stats.history, ledgerFilter]);
+                let list = Array.isArray(stats.history) ? stats.history : [];
+                if (ledgerFilter !== 'all') {
+                    list = list.filter(h => h.t === ledgerFilter);
+                }
+                if (ledgerMonthFilter && ledgerMonthFilter !== 'all') {
+                    list = list.filter(h => (h.monthKey || String(h.date || '').slice(0, 7)) === ledgerMonthFilter);
+                }
+                return list;
+            }, [stats.history, ledgerFilter, ledgerMonthFilter]);
+
+            const activeMonthSummary = useMemo(() => {
+                if (!ledgerMonthFilter || ledgerMonthFilter === 'all') return null;
+                return (stats.monthlySummaries || []).find(m => m.monthKey === ledgerMonthFilter) || null;
+            }, [stats.monthlySummaries, ledgerMonthFilter]);
+
+            const handleSaveMonthlySnapshot = async () => {
+                if (!activeMonthSummary || !window.AlOstaLedgerEngine) return;
+                haptic();
+                try {
+                    const activeProj = selectedProject || focusedProj;
+                    await window.AlOstaLedgerEngine.saveMonthlyArchiveSnapshot(
+                        db,
+                        adminId,
+                        activeProj?.id || 'all',
+                        activeProj?.title || 'كافة المشاريع',
+                        activeMonthSummary
+                    );
+                    addToast(
+                        lang === 'ar'
+                            ? `📦 تم حفظ أرشيف وخلاصة شهر (${window.AlOstaLedgerEngine.formatMonthLabel(activeMonthSummary.monthKey, 'ar')}) في السحابة ✓`
+                            : `📦 Saved monthly snapshot (${activeMonthSummary.monthKey}) ✓`
+                    );
+                } catch (e) {
+                    addToast('Error');
+                }
+            };
 
             const activeViewTheme = {
                 project: {
@@ -6722,10 +6771,61 @@
                                         })()}
 
                                         <div className="bg-white dark:bg-slate-800 p-4 rounded-3xl border dark:border-slate-700 shadow-xs">
-                                            <div className="flex justify-between items-center mb-3 border-b dark:border-slate-700 pb-2.5">
-                                                <h4 className="font-black text-slate-700 dark:text-slate-200 text-xs">{tr('financialRec')}</h4>
-                                                <span className="text-[10px] bg-indigo-50 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-300 px-2.5 py-0.5 rounded-full font-bold">{filteredHistory.length}</span>
+                                            <div className="flex flex-wrap justify-between items-center gap-2 mb-3 border-b dark:border-slate-700 pb-2.5">
+                                                <div className="flex items-center gap-2">
+                                                    <h4 className="font-black text-slate-700 dark:text-slate-200 text-xs">{tr('financialRec')}</h4>
+                                                    <span className="text-[10px] bg-indigo-50 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-300 px-2.5 py-0.5 rounded-full font-bold">{filteredHistory.length}</span>
+                                                </div>
+
+                                                {/* Monthly Filter & Snapshot Archiver Selector */}
+                                                {Array.isArray(stats.monthlySummaries) && stats.monthlySummaries.length > 0 && (
+                                                    <div className="flex items-center gap-1.5">
+                                                        <select
+                                                            value={ledgerMonthFilter}
+                                                            onChange={(e) => {
+                                                                haptic();
+                                                                setLedgerMonthFilter(e.target.value);
+                                                                setLedgerPageLimit(40);
+                                                            }}
+                                                            className="px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[11px] font-black text-slate-700 dark:text-slate-200 outline-none"
+                                                        >
+                                                            <option value="all">{lang === 'ar' ? '📅 كل الأشهر' : '📅 All Months'}</option>
+                                                            {stats.monthlySummaries.map(m => (
+                                                                <option key={m.monthKey} value={m.monthKey}>
+                                                                    {window.AlOstaLedgerEngine ? window.AlOstaLedgerEngine.formatMonthLabel(m.monthKey, lang) : m.monthKey} ({m.count})
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                        {activeMonthSummary && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={handleSaveMonthlySnapshot}
+                                                                className="px-2.5 py-1 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-[10px] font-black active:scale-95 transition-all shrink-0"
+                                                                title={lang === 'ar' ? 'حفظ أرشيف وخلاصة هذا الشهر' : 'Archive Month Snapshot'}
+                                                            >
+                                                                📦 {lang === 'ar' ? 'أرشفة الشهر' : 'Archive'}
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                )}
                                             </div>
+
+                                            {activeMonthSummary && (
+                                                <div className="mb-3 p-2.5 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/35 border border-indigo-200/70 dark:border-indigo-800/60 grid grid-cols-3 gap-1.5 text-center">
+                                                    <div>
+                                                        <p className="text-[9px] font-bold text-slate-500 dark:text-slate-400">{lang === 'ar' ? 'دفعات الشهر' : 'Month In'}</p>
+                                                        <p className="text-[11px] font-black text-emerald-600 dark:text-emerald-400 dir-ltr">+{fmtMoney(activeMonthSummary.inTotal, lang)}</p>
+                                                    </div>
+                                                    <div>
+                                                        <p className="text-[9px] font-bold text-slate-500 dark:text-slate-400">{lang === 'ar' ? 'مواد الشهر' : 'Materials'}</p>
+                                                        <p className="text-[11px] font-black text-rose-600 dark:text-rose-400 dir-ltr">-{fmtMoney(activeMonthSummary.outTotal, lang)}</p>
+                                                    </div>
+                                                    <div>
+                                                        <p className="text-[9px] font-bold text-slate-500 dark:text-slate-400">{lang === 'ar' ? 'سلف الشهر' : 'Advances'}</p>
+                                                        <p className="text-[11px] font-black text-amber-600 dark:text-amber-400 dir-ltr">-{fmtMoney(activeMonthSummary.advTotal, lang)}</p>
+                                                    </div>
+                                                </div>
+                                            )}
 
                                             <div className="flex gap-1.5 mb-3 overflow-x-auto hide-scroll">
                                                 {[
@@ -6736,7 +6836,7 @@
                                                 ].map(tab => (
                                                     <button
                                                         key={tab.id}
-                                                        onClick={() => setLedgerFilter(tab.id)}
+                                                        onClick={() => { setLedgerFilter(tab.id); setLedgerPageLimit(40); }}
                                                         className={`px-3 py-1 rounded-xl text-[11px] font-bold transition-colors ${ledgerFilter === tab.id ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300'}`}
                                                     >
                                                         {tab.l}
@@ -6748,7 +6848,7 @@
                                                 <p className="text-center text-xs text-slate-400 py-6">{tr('noData')}</p>
                                             ) : (
                                                 <div className="space-y-2.5">
-                                                    {filteredHistory.slice(0, 40).map(h => {
+                                                    {filteredHistory.slice(0, ledgerPageLimit).map(h => {
                                                         const isIn = h.t === 'in';
                                                         const isAdv = h.t === 'adv';
                                                         const rawLabel = isIn
@@ -6882,6 +6982,17 @@
                                                             </div>
                                                         );
                                                     })}
+                                                    {filteredHistory.length > ledgerPageLimit && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => { haptic(); setLedgerPageLimit(prev => prev + 40); }}
+                                                            className="w-full py-2.5 rounded-2xl bg-slate-100 dark:bg-slate-900 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 text-indigo-600 dark:text-indigo-300 border border-slate-200 dark:border-slate-700 text-xs font-black active:scale-95 transition-all"
+                                                        >
+                                                            ⬇️ {lang === 'ar'
+                                                                ? `عرض المزيد من السجلات (${filteredHistory.length - ledgerPageLimit} حركة متبقية)`
+                                                                : `Load More (${filteredHistory.length - ledgerPageLimit} remaining)`}
+                                                        </button>
+                                                    )}
                                                 </div>
                                             )}
                                         </div>
@@ -12072,8 +12183,12 @@
             const [l, setL] = useState(false);
             const [loginMethod, setLoginMethod] = useState('phone');
             const [showPwd, setShowPwd] = useState(false);
-            const [failCount, setFailCount] = useState(0);
-            const [lockUntil, setLockUntil] = useState(0);
+            const [failCount, setFailCount] = useState(() =>
+                window.AlOstaSecurityGuard ? window.AlOstaSecurityGuard.getLockoutState().count : 0
+            );
+            const [lockUntil, setLockUntil] = useState(() =>
+                window.AlOstaSecurityGuard ? window.AlOstaSecurityGuard.getLockoutState().lockUntil : 0
+            );
             const [lockRemainingSec, setLockRemainingSec] = useState(0);
             const [humanVerifyCode, setHumanVerifyCode] = useState(() => String(Math.floor(1000 + Math.random() * 9000)));
             const [humanVerifyInput, setHumanVerifyInput] = useState('');
@@ -12104,6 +12219,12 @@
             }, [lockUntil]);
 
             const recordFailedAttempt = () => {
+                if (window.AlOstaSecurityGuard) {
+                    const st = window.AlOstaSecurityGuard.recordFailedLoginAttempt();
+                    setFailCount(st.count);
+                    setLockUntil(st.lockUntil);
+                    return;
+                }
                 const next = failCount + 1;
                 setFailCount(next);
                 if (next >= 5) {
@@ -12955,36 +13076,41 @@
             return { storeId: s, code: s.toUpperCase(), isUrlMode: false };
         };
 
-        // Optimization 3: Ultra-compact WebP compression (~15-25KB per product photo) with JPEG fallback
-        const compressPortalImage = (file, maxWidth = 460, quality = 0.72) => new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = (ev) => {
-                const img = new Image();
-                img.onload = () => {
-                    const canvas = document.createElement('canvas');
-                    let w = img.width, h = img.height;
-                    if (w > maxWidth || h > maxWidth) {
-                        if (w >= h) { h = Math.round((h * maxWidth) / w); w = maxWidth; }
-                        else { w = Math.round((w * maxWidth) / h); h = maxWidth; }
-                    }
-                    canvas.width = w; canvas.height = h;
-                    const ctx = canvas.getContext('2d');
-                    ctx.fillStyle = '#ffffff';
-                    ctx.fillRect(0, 0, w, h);
-                    ctx.drawImage(img, 0, 0, w, h);
-                    const webpUrl = canvas.toDataURL('image/webp', quality);
-                    if (webpUrl && webpUrl.startsWith('data:image/webp')) {
-                        resolve(webpUrl);
-                    } else {
-                        resolve(canvas.toDataURL('image/jpeg', quality));
-                    }
+        // Optimization 3: Adaptive WebP/JPEG compression (<56KB) via AlOstaMediaOptimizer module
+        const compressPortalImage = (file, maxWidth = 480, quality = 0.74) => {
+            if (window.AlOstaMediaOptimizer && typeof window.AlOstaMediaOptimizer.compressImageAdaptive === 'function') {
+                return window.AlOstaMediaOptimizer.compressImageAdaptive(file, maxWidth, quality, 56000);
+            }
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        let w = img.width, h = img.height;
+                        if (w > maxWidth || h > maxWidth) {
+                            if (w >= h) { h = Math.round((h * maxWidth) / w); w = maxWidth; }
+                            else { w = Math.round((w * maxWidth) / h); h = maxWidth; }
+                        }
+                        canvas.width = w; canvas.height = h;
+                        const ctx = canvas.getContext('2d');
+                        ctx.fillStyle = '#ffffff';
+                        ctx.fillRect(0, 0, w, h);
+                        ctx.drawImage(img, 0, 0, w, h);
+                        const webpUrl = canvas.toDataURL('image/webp', quality);
+                        if (webpUrl && webpUrl.startsWith('data:image/webp')) {
+                            resolve(webpUrl);
+                        } else {
+                            resolve(canvas.toDataURL('image/jpeg', quality));
+                        }
+                    };
+                    img.onerror = reject;
+                    img.src = ev.target.result;
                 };
-                img.onerror = reject;
-                img.src = ev.target.result;
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-        });
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        };
 
         const StoreOwnerPortal = ({ storeKeyInput, onExit, addToast }) => {
             const [entryInput, setEntryInput] = useState(storeKeyInput === 'prompt' ? '' : (storeKeyInput || ''));
@@ -13158,7 +13284,11 @@
                     oldPrice: Math.max(0, normalizedOldPrice),
                     unit: AlOstaCrypto.sanitizeText(f.unit.value, 30) || 'قطعة',
                     icon: secObj?.icon || catObj.icon || '🎨',
-                    imageUrl: AlOstaCrypto.sanitizeImageUrl(imgPreview || f.imageUrl?.value || ''),
+                    imageUrl: AlOstaCrypto.sanitizeImageUrl(
+                        (window.AlOstaMediaOptimizer && imgPreview)
+                            ? await window.AlOstaMediaOptimizer.optimizeAndBackupMediaBlob(db, imgPreview, `store_${store.id}`)
+                            : (imgPreview || f.imageUrl?.value || '')
+                    ),
                     storeId: store.id,
                     storeName: store.name || 'معرض معتمد',
                     desc: AlOstaCrypto.sanitizeText(f.desc.value, 400),
@@ -14223,6 +14353,11 @@
                     setStorePortalKey('prompt');
                     return;
                 }
+                if (window.AlOstaSecurityGuard) {
+                    window.AlOstaSecurityGuard.resetLoginAttempts();
+                    const accId = type === 'admin' ? data : (data?.id || '');
+                    window.AlOstaSecurityGuard.bindSessionToAuthUid(db, type, accId).catch(() => {});
+                }
                 const x = { type, data };
                 AlOstaCrypto.saveSecureSession('cw_v42_s', x);
                 setS(x);
@@ -14258,7 +14393,8 @@
         };
         ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     </script>
-    <script src="./vendor/app-compiled.js?v=v1_0_11"></script>
+    <script src="./vendor/alosta-engine.js?v=v1_0_12"></script>
+    <script src="./vendor/app-compiled.js?v=v1_0_12"></script>
 </body>
 
 </html>

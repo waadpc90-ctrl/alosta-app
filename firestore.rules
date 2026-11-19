@@ -1,0 +1,101 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isValidPayloadSize() {
+      return request.resource.data.keys().size() <= 120;
+    }
+
+    function hasValidAdminId() {
+      return request.resource.data.adminId is string &&
+             request.resource.data.adminId.size() >= 1 &&
+             request.resource.data.adminId.size() <= 128;
+    }
+
+    match /settings/{docId} {
+      allow read: if true;
+      allow write: if isAuthenticated() && isValidPayloadSize();
+    }
+
+    match /admins/{adminId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidPayloadSize();
+      allow delete: if false;
+    }
+
+    match /workers/{workerId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidPayloadSize();
+      allow delete: if isAuthenticated();
+    }
+
+    match /projects/{projectId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidPayloadSize() && hasValidAdminId();
+      allow delete: if isAuthenticated();
+    }
+
+    match /attendance/{attId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidPayloadSize();
+      allow delete: if isAuthenticated();
+    }
+
+    match /payments/{payId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidPayloadSize() && hasValidAdminId();
+      allow delete: if isAuthenticated();
+    }
+
+    match /expenses/{expId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidPayloadSize() && hasValidAdminId();
+      allow delete: if isAuthenticated();
+    }
+
+    match /advances/{advId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidPayloadSize() && hasValidAdminId();
+      allow delete: if isAuthenticated();
+    }
+
+    match /monthly_snapshots/{snapId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidPayloadSize() && hasValidAdminId();
+      allow delete: if isAuthenticated();
+    }
+
+    match /stores/{storeId} {
+      allow read: if true;
+      allow create, update: if isAuthenticated() && isValidPayloadSize();
+      allow delete: if isAuthenticated();
+    }
+
+    match /store_products/{prodId} {
+      allow read: if true;
+      allow create, update: if isAuthenticated() && isValidPayloadSize();
+      allow delete: if isAuthenticated();
+    }
+
+    match /store_orders/{orderId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidPayloadSize();
+      allow delete: if isAuthenticated();
+    }
+
+    match /media_blobs/{blobId} {
+      allow read: if true;
+      allow create, update: if isAuthenticated() && isValidPayloadSize();
+      allow delete: if isAuthenticated();
+    }
+
+    match /{collectionName}/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && isValidPayloadSize();
+    }
+  }
+}
