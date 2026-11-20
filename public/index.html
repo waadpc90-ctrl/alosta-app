@@ -476,7 +476,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.12";
+        const APP_VERSION = "1.0.13";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -7268,89 +7268,6 @@
                                                     ))}
                                                 </div>
                                             </div>
-
-                                            {/* Quick-Access Dropdown List & Favorite Showrooms Strip */}
-                                            {sortedStoresWithDist.length > 0 && (() => {
-                                                const favStores = sortedStoresWithDist.filter(s => s.isFavorite);
-                                                const ratedStores = sortedStoresWithDist.filter(s => !s.isFavorite && s.overallRating > 0);
-                                                const otherStores = sortedStoresWithDist.filter(s => !s.isFavorite && !(s.overallRating > 0));
-                                                return (
-                                                    <div className="bg-amber-50/60 dark:bg-amber-950/20 p-2.5 rounded-2xl border border-amber-200/80 dark:border-amber-800/50 space-y-2">
-                                                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                                                            <div className="flex items-center gap-1.5 text-[11px] font-black text-amber-900 dark:text-amber-300 shrink-0">
-                                                                <span>⚡</span>
-                                                                <span>{lang === 'ar' ? 'قائمة الوصول السريع للمعارض المفضلة والمُقيّمة:' : 'Quick Access to Favorite & Rated Showrooms:'}</span>
-                                                            </div>
-                                                            <select
-                                                                value={selectedShowroom?.id || ''}
-                                                                onChange={(e) => {
-                                                                    const st = sortedStoresWithDist.find(x => x.id === e.target.value);
-                                                                    if (st) selectShowroom(st);
-                                                                }}
-                                                                className="flex-1 p-2 rounded-xl bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700/80 text-slate-800 dark:text-slate-100 text-xs font-black outline-none focus:border-amber-500"
-                                                            >
-                                                                {favStores.length > 0 && (
-                                                                    <optgroup label={lang === 'ar' ? `⭐ معارضي المفضلة للوصول السريع (${favStores.length})` : `⭐ My Favorite Showrooms (${favStores.length})`}>
-                                                                        {favStores.map(st => (
-                                                                            <option key={st.id} value={st.id}>
-                                                                                ⭐ {st.name} {st.overallRating > 0 ? `— ★ ${st.overallRating}` : ''} {isFinite(st.distInfo?.distMeters) ? `— (${st.distInfo.distText})` : ''}
-                                                                            </option>
-                                                                        ))}
-                                                                    </optgroup>
-                                                                )}
-                                                                {ratedStores.length > 0 && (
-                                                                    <optgroup label={lang === 'ar' ? `🏆 معارض مقيّمة حسب المعايير (${ratedStores.length})` : `🏆 Rated Showrooms (${ratedStores.length})`}>
-                                                                        {ratedStores.map(st => (
-                                                                            <option key={st.id} value={st.id}>
-                                                                                🏆 {st.name} — ★ {st.overallRating} {isFinite(st.distInfo?.distMeters) ? `— (${st.distInfo.distText})` : ''}
-                                                                            </option>
-                                                                        ))}
-                                                                    </optgroup>
-                                                                )}
-                                                                <optgroup label={lang === 'ar' ? `🏪 كافة المعارض المعتمدة (${sortedStoresWithDist.length})` : `🏪 All Verified Showrooms (${sortedStoresWithDist.length})`}>
-                                                                    {(otherStores.length > 0 ? otherStores : sortedStoresWithDist).map(st => (
-                                                                        <option key={st.id} value={st.id}>
-                                                                            🏪 {st.name} {st.overallRating > 0 ? `— ★ ${st.overallRating}` : ''} {isFinite(st.distInfo?.distMeters) ? `— (${st.distInfo.distText})` : ''}
-                                                                        </option>
-                                                                    ))}
-                                                                </optgroup>
-                                                            </select>
-                                                        </div>
-
-                                                        {/* 1-Tap Favorite Showrooms Pills for Instant Switching */}
-                                                        {favStores.length > 0 && (
-                                                            <div className="flex items-center gap-1.5 overflow-x-auto hide-scroll pt-0.5">
-                                                                <span className="text-[10px] font-black text-amber-700 dark:text-amber-400 shrink-0">
-                                                                    ⭐ {lang === 'ar' ? 'المفضلة:' : 'Favorites:'}
-                                                                </span>
-                                                                {favStores.map(st => {
-                                                                    const isSel = selectedShowroom?.id === st.id;
-                                                                    return (
-                                                                        <button
-                                                                            key={st.id}
-                                                                            type="button"
-                                                                            onClick={() => selectShowroom(st)}
-                                                                            className={`shrink-0 px-2.5 py-1 rounded-xl text-[11px] font-black flex items-center gap-1 border transition-all active:scale-95 ${
-                                                                                isSel
-                                                                                    ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-xs'
-                                                                                    : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border-amber-300/80 dark:border-amber-700/70'
-                                                                            }`}
-                                                                        >
-                                                                            <span>⭐</span>
-                                                                            <span>{st.name}</span>
-                                                                            {st.overallRating > 0 && (
-                                                                                <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300">
-                                                                                    ★{st.overallRating}
-                                                                                </span>
-                                                                            )}
-                                                                        </button>
-                                                                    );
-                                                                })}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                );
-                                            })()}
 
                                             {/* Specialty & Favorites Filter Chips */}
                                             <div className="flex gap-1.5 overflow-x-auto hide-scroll">
@@ -14393,8 +14310,8 @@
         };
         ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     </script>
-    <script src="./vendor/alosta-engine.js?v=v1_0_12"></script>
-    <script src="./vendor/app-compiled.js?v=v1_0_12"></script>
+    <script src="./vendor/alosta-engine.js?v=v1_0_13"></script>
+    <script src="./vendor/app-compiled.js?v=v1_0_13"></script>
 </body>
 
 </html>
