@@ -1,3 +1,4 @@
+/* Al-Osta Modular Architecture Engine v1.0.14 */
 /**
  * Module 01: Al-Osta Enterprise Security, Firebase Auth UID Session Binding & Brute-Force Guard
  * Solves: Client-side session tampering, refresh-bypass on login lockouts, and Auth UID binding.
@@ -136,7 +137,7 @@
     };
 
     /**
-     * Builds O(1) lookup maps once per data change so project calculations don't re-scan arrays repeatedly.
+     * Builds O(1) lookup maps once per data change so project & worker calculations don't re-scan arrays repeatedly.
      */
     const buildIndexedLedger = (data, resolveOwnerFn, getWageFn, calcWageFn) => {
         const projects = Array.isArray(data?.projects) ? data.projects : [];
@@ -147,9 +148,22 @@
         const attendance = Array.isArray(data?.attendance) ? data.attendance : [];
 
         const workerMap = new Map();
+        const workerStatsMap = new Map();
         for (let i = 0; i < workers.length; i++) {
             const w = workers[i];
-            if (w && w.id) workerMap.set(w.id, w);
+            if (w && w.id) {
+                workerMap.set(w.id, w);
+                const officialWage = typeof getWageFn === 'function' ? getWageFn(w) : (Number(w.wage) || 25000);
+                workerStatsMap.set(w.id, {
+                    officialWage,
+                    activeDays: 0,
+                    wageEarned: 0,
+                    workerMatCredit: 0,
+                    advances: 0,
+                    earned: 0,
+                    currentDue: 0
+                });
+            }
         }
 
         const projectMap = new Map();
@@ -179,18 +193,54 @@
         }
         for (let i = 0; i < expenses.length; i++) {
             const x = expenses[i];
-            if (x) pushToMap(expByProj, x.projectId, x);
+            if (!x) continue;
+            pushToMap(expByProj, x.projectId, x);
+            if (x.paidByWorkerId && !x.settled) {
+                const ws = workerStatsMap.get(x.paidByWorkerId);
+                if (ws) ws.workerMatCredit += (Number(x.cost) || 0);
+            }
         }
         for (let i = 0; i < advances.length; i++) {
             const x = advances[i];
-            if (x) pushToMap(advByProj, x.projectId, x);
+            if (!x) continue;
+            pushToMap(advByProj, x.projectId, x);
+            if (x.workerId && !x.settled) {
+                const ws = workerStatsMap.get(x.workerId);
+                if (ws) ws.advances += (Number(x.amount) || 0);
+            }
         }
         for (let i = 0; i < attendance.length; i++) {
             const a = attendance[i];
             if (!a) continue;
             const ownerProjId = typeof resolveOwnerFn === 'function' ? resolveOwnerFn(a, projects) : a.projectId;
             if (ownerProjId) pushToMap(attByProj, ownerProjId, a);
+            if (a.workerId && !a.settled) {
+                const ws = workerStatsMap.get(a.workerId);
+                if (ws) {
+                    if (a.status !== 'absent') ws.activeDays += 1;
+                    if (typeof calcWageFn === 'function') {
+                        ws.wageEarned += calcWageFn(a.status, ws.officialWage);
+                    }
+                }
+            }
         }
+
+        workerStatsMap.forEach((ws) => {
+            ws.earned = ws.wageEarned + ws.workerMatCredit;
+            ws.currentDue = ws.earned - ws.advances;
+        });
+
+        const getWorkerStats = (workerId) => {
+            return workerStatsMap.get(workerId) || {
+                officialWage: 25000,
+                activeDays: 0,
+                wageEarned: 0,
+                workerMatCredit: 0,
+                advances: 0,
+                earned: 0,
+                currentDue: 0
+            };
+        };
 
         const computeForProject = (pId) => {
             const activeProj = pId ? projectMap.get(pId) : null;
@@ -283,7 +333,6 @@
             }
             history.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
 
-            // Build Monthly Breakdown Index for instant month filtering & archiving
             const monthsMap = new Map();
             for (let i = 0; i < history.length; i++) {
                 const h = history[i];
@@ -322,6 +371,8 @@
         return {
             workerMap,
             projectMap,
+            workerStatsMap,
+            getWorkerStats,
             computeForProject
         };
     };

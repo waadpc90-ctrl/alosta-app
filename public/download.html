@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>باركود تحميل تطبيق الأسطة — للأندرويد والآيفون</title>
+    <link rel="icon" type="image/png" href="./app-icon-192.png" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <script src="./vendor/tailwindcss.js"></script>
+    <script src="./vendor/qrious.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@600;700;800;900&display=swap');
+        body {
+            font-family: 'Cairo', system-ui, -apple-system, sans-serif;
+            background: radial-gradient(circle at top, #1e1b4b 0%, #0f172a 60%, #020617 100%);
+            min-height: 100vh;
+            color: #f8fafc;
+        }
+        @media print {
+            .no-print { display: none !important; }
+            body { background: #ffffff !important; color: #0f172a !important; }
+            .qr-card { border: 2px solid #cbd5e1 !important; background: #ffffff !important; color: #0f172a !important; box-shadow: none !important; }
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8 flex flex-col items-center justify-start">
+
+    <!-- Auto-Redirect Status Banner when scanned with ?auto=1 -->
+    <div id="auto-action-banner" class="hidden w-full max-w-2xl mb-6 p-5 rounded-3xl bg-gradient-to-l from-emerald-600 to-teal-700 text-white shadow-2xl border border-emerald-400/40 text-center space-y-3">
+        <div id="auto-action-title" class="text-lg sm:text-xl font-black">جاري تجهيز النسخة المناسبة لهاتفك...</div>
+        <p id="auto-action-desc" class="text-xs sm:text-sm font-bold text-emerald-100"></p>
+        <div class="flex flex-wrap items-center justify-center gap-3 pt-1">
+            <a id="auto-primary-btn" href="./AlOsta_App.apk" class="px-6 py-3 rounded-2xl bg-white text-slate-900 font-black text-sm shadow-lg active:scale-95 transition-transform">
+                تحميل الآن
+            </a>
+            <button onclick="document.getElementById('auto-action-banner').classList.add('hidden')" class="px-4 py-3 rounded-2xl bg-black/25 text-white font-bold text-xs">
+                عرض رموز الباركود (QR)
+            </button>
+        </div>
+    </div>
+
+    <!-- Header -->
+    <div class="w-full max-w-4xl text-center space-y-2 mb-6">
+        <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-amber-400/15 border border-amber-400/30 text-amber-300 text-xs font-black">
+            <span>📲</span>
+            <span>نظام التحميل الذكي المباشر — الإصدار v1.0.13</span>
+        </div>
+        <h1 class="text-2xl sm:text-4xl font-black tracking-tight text-white">
+            باركود تنزيل تطبيق «الأسطة»
+        </h1>
+        <p class="text-xs sm:text-sm font-bold text-slate-300 max-w-xl mx-auto">
+            امسح الباركود بكاميرا الهاتف مباشرة لتنزيل تطبيق الأندرويد (<span class="text-emerald-400">APK مباشر</span>) أو تشغيل وتثبيت نسخة الآيفون (<span class="text-amber-300">iOS PWA</span>)
+        </p>
+    </div>
+
+    <!-- Direct Action Buttons for Current Device -->
+    <div class="w-full max-w-4xl grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6 no-print">
+        <a id="direct-android-btn" href="./AlOsta_App.apk" download="AlOsta_App.apk"
+           class="flex items-center justify-between p-4 rounded-2xl bg-gradient-to-l from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-xl border border-emerald-400/30 active:scale-95 transition-all">
+            <div class="flex items-center gap-3">
+                <span class="text-3xl">🤖</span>
+                <div class="text-right">
+                    <div class="font-black text-sm sm:text-base">تنزيل مباشر للأندرويد (APK)</div>
+                    <div class="text-[11px] font-bold text-emerald-100">AlOsta_App.apk • تثبيت فوري مباشر</div>
+                </div>
+            </div>
+            <span class="px-3 py-1.5 rounded-xl bg-white/20 text-xs font-black">تنزيل ⬇</span>
+        </a>
+
+        <a id="direct-ios-btn" href="./index.html"
+           class="flex items-center justify-between p-4 rounded-2xl bg-gradient-to-l from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white shadow-xl border border-indigo-400/30 active:scale-95 transition-all">
+            <div class="flex items-center gap-3">
+                <span class="text-3xl">🍎</span>
+                <div class="text-right">
+                    <div class="font-black text-sm sm:text-base">فتح وتثبيت نسخة الآيفون (iOS)</div>
+                    <div class="text-[11px] font-bold text-indigo-100">افتح في Safari ثم اختر "إضافة للشاشة الرئيسية"</div>
+                </div>
+            </div>
+            <span class="px-3 py-1.5 rounded-xl bg-white/20 text-xs font-black">فتح ↗</span>
+        </a>
+    </div>
+
+    <!-- Link Source Switcher (Live Server vs GitHub Permanent Link) -->
+    <div class="w-full max-w-4xl bg-slate-900/90 border border-slate-700/80 rounded-2xl p-3 mb-6 flex flex-col sm:flex-row items-center justify-between gap-3 no-print">
+        <div class="text-xs font-black text-slate-300 flex items-center gap-2">
+            <span>🔗</span>
+            <span>مصدر رابط الباركود:</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+            <button id="mode-current-btn" onclick="setQrBaseMode('current')"
+                    class="flex-1 sm:flex-initial px-3.5 py-2 rounded-xl text-xs font-black bg-amber-400 text-slate-950 shadow-sm transition-all">
+                ⚡ الرابط المباشر الحالي (فوري)
+            </button>
+            <button id="mode-github-btn" onclick="setQrBaseMode('github')"
+                    class="flex-1 sm:flex-initial px-3.5 py-2 rounded-xl text-xs font-black bg-slate-800 text-slate-300 border border-slate-700 transition-all">
+                🌐 رابط GitHub الدائم (alustadh)
+            </button>
+            <button onclick="window.print()"
+                    class="px-3.5 py-2 rounded-xl text-xs font-black bg-indigo-600 text-white shadow-sm">
+                🖨️ طباعة البطاقات
+            </button>
+        </div>
+    </div>
+
+    <!-- 3 QR Code Cards Grid -->
+    <div class="w-full max-w-4xl grid grid-cols-1 md:grid-cols-3 gap-5">
+
+        <!-- Card 1: Smart Unified QR (Auto Android APK + Auto iPhone PWA) -->
+        <div class="qr-card bg-slate-900/95 border-2 border-amber-400/60 rounded-3xl p-5 flex flex-col items-center text-center shadow-2xl relative overflow-hidden">
+            <div class="px-3 py-1 rounded-full bg-amber-400 text-slate-950 text-[11px] font-black mb-2">
+                ⭐ موصى به (تلقائي للجميع)
+            </div>
+            <h2 class="text-base font-black text-white mb-1">باركود ذكي موحّد</h2>
+            <p class="text-[11px] font-bold text-slate-400 mb-4">
+                يتعرف تلقائياً على نوع الجهاز: يحمّل <span class="text-emerald-400">APK للأندرويد</span> أو يفتح <span class="text-amber-300">نسخة الآيفون</span>
+            </p>
+            <div class="bg-white p-3.5 rounded-2xl shadow-inner mb-3">
+                <canvas id="qr-smart" width="220" height="220" class="w-[200px] h-[200px]"></canvas>
+            </div>
+            <p id="url-smart" class="text-[10px] font-mono text-amber-300/90 break-all mb-3 px-2 dir-ltr"></p>
+            <div class="w-full flex gap-2 mt-auto no-print">
+                <button onclick="downloadQrPng('qr-smart', 'AlOsta_Smart_QR.png', 'باركود تطبيق الأسطة (آيفون + أندرويد)')"
+                        class="flex-1 py-2.5 px-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs active:scale-95 transition-all">
+                    📥 حفظ صورة الباركود
+                </button>
+                <button onclick="copyUrl('smart')"
+                        class="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs border border-slate-700">
+                    نسخ
+                </button>
+            </div>
+        </div>
+
+        <!-- Card 2: Direct Android APK QR -->
+        <div class="qr-card bg-slate-900/95 border border-emerald-500/40 rounded-3xl p-5 flex flex-col items-center text-center shadow-2xl">
+            <div class="px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 text-[11px] font-black mb-2">
+                🤖 أندرويد مباشر (APK)
+            </div>
+            <h2 class="text-base font-black text-white mb-1">باركود الأندرويد المباشر</h2>
+            <p class="text-[11px] font-bold text-slate-400 mb-4">
+                يبدأ تنزيل ملف <span class="text-emerald-400 font-mono">AlOsta_App.apk</span> مباشرةً على الهاتف بمجرد مسح الباركود
+            </p>
+            <div class="bg-white p-3.5 rounded-2xl shadow-inner mb-3">
+                <canvas id="qr-android" width="220" height="220" class="w-[200px] h-[200px]"></canvas>
+            </div>
+            <p id="url-android" class="text-[10px] font-mono text-emerald-300/90 break-all mb-3 px-2 dir-ltr"></p>
+            <div class="w-full flex gap-2 mt-auto no-print">
+                <button onclick="downloadQrPng('qr-android', 'AlOsta_Android_APK_QR.png', 'باركود تنزيل الأسطة للأندرويد APK')"
+                        class="flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs active:scale-95 transition-all">
+                    📥 حفظ باركود الأندرويد
+                </button>
+                <button onclick="copyUrl('android')"
+                        class="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs border border-slate-700">
+                    نسخ
+                </button>
+            </div>
+        </div>
+
+        <!-- Card 3: Direct iPhone / iOS PWA QR -->
+        <div class="qr-card bg-slate-900/95 border border-indigo-500/40 rounded-3xl p-5 flex flex-col items-center text-center shadow-2xl">
+            <div class="px-3 py-1 rounded-full bg-indigo-500/20 border border-indigo-400/40 text-indigo-300 text-[11px] font-black mb-2">
+                🍎 آيفون وآيباد (iOS)
+            </div>
+            <h2 class="text-base font-black text-white mb-1">باركود الآيفون المباشر</h2>
+            <p class="text-[11px] font-bold text-slate-400 mb-4">
+                يفتح تطبيق الأسطة للآيفون مباشرة في Safari مع خيار <span class="text-indigo-300">إضافة للشاشة الرئيسية</span>
+            </p>
+            <div class="bg-white p-3.5 rounded-2xl shadow-inner mb-3">
+                <canvas id="qr-ios" width="220" height="220" class="w-[200px] h-[200px]"></canvas>
+            </div>
+            <p id="url-ios" class="text-[10px] font-mono text-indigo-300/90 break-all mb-3 px-2 dir-ltr"></p>
+            <div class="w-full flex gap-2 mt-auto no-print">
+                <button onclick="downloadQrPng('qr-ios', 'AlOsta_iPhone_iOS_QR.png', 'باركود تطبيق الأسطة للآيفون iOS')"
+                        class="flex-1 py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-xs active:scale-95 transition-all">
+                    📥 حفظ باركود الآيفون
+                </button>
+                <button onclick="copyUrl('ios')"
+                        class="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs border border-slate-700">
+                    نسخ
+                </button>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- iPhone Quick Installation Steps -->
+    <div class="w-full max-w-4xl mt-6 bg-slate-900/80 border border-slate-800 rounded-3xl p-4 sm:p-5">
+        <h3 class="text-xs sm:text-sm font-black text-amber-300 mb-2 flex items-center gap-2">
+            <span>💡</span>
+            <span>طريقة التثبيت السريع بعد مسح الباركود:</span>
+        </h3>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs font-bold text-slate-300">
+            <div class="bg-slate-950/60 p-3 rounded-2xl border border-emerald-500/20">
+                <span class="text-emerald-400 font-black">🤖 لأجهزة الأندرويد:</span>
+                بمجرد مسح الباركود بالكاميرا يبدأ تنزيل ملف <span class="font-mono text-white">AlOsta_App.apk</span> مباشرةً، اضغط على الملف بعد التحميل واختر <b>تثبيت (Install)</b>.
+            </div>
+            <div class="bg-slate-950/60 p-3 rounded-2xl border border-indigo-500/20">
+                <span class="text-indigo-400 font-black">🍎 لأجهزة الآيفون (iOS):</span>
+                بمجرد مسح الباركود يفتح التطبيق في متصفح <b>Safari</b>، اضغط على زر <b>المشاركة ⬆️</b> في الأسفل ثم اختر <b>إضافة إلى الشاشة الرئيسية (Add to Home Screen) ➕</b>.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const GITHUB_BASE = 'https://waadpc90-ctrl.github.io/alustadh/';
+        const GITHUB_RAW_APK = 'https://github.com/waadpc90-ctrl/alustadh/raw/main/AlOsta_App.apk';
+
+        let activeMode = 'current';
+        let currentUrls = { smart: '', android: '', ios: '' };
+
+        function getCurrentBaseUrl() {
+            const loc = window.location.href.split('?')[0].split('#')[0];
+            if (loc.endsWith('/download.html')) {
+                return loc.slice(0, -'download.html'.length);
+            }
+            return loc.endsWith('/') ? loc : (loc + '/');
+        }
+
+        function computeUrls(mode) {
+            if (mode === 'github') {
+                return {
+                    smart: GITHUB_BASE + 'download.html?auto=1',
+                    android: GITHUB_RAW_APK,
+                    ios: GITHUB_BASE + 'index.html'
+                };
+            }
+            const base = getCurrentBaseUrl();
+            return {
+                smart: base + 'download.html?auto=1',
+                android: base + 'AlOsta_App.apk?download=1',
+                ios: base + 'index.html'
+            };
+        }
+
+        function renderAllQrs() {
+            currentUrls = computeUrls(activeMode);
+
+            document.getElementById('url-smart').textContent = currentUrls.smart;
+            document.getElementById('url-android').textContent = currentUrls.android;
+            document.getElementById('url-ios').textContent = currentUrls.ios;
+
+            if (window.QRious) {
+                new QRious({
+                    element: document.getElementById('qr-smart'),
+                    value: currentUrls.smart,
+                    size: 260,
+                    level: 'M',
+                    background: '#ffffff',
+                    foreground: '#0f172a'
+                });
+                new QRious({
+                    element: document.getElementById('qr-android'),
+                    value: currentUrls.android,
+                    size: 260,
+                    level: 'M',
+                    background: '#ffffff',
+                    foreground: '#064e3b'
+                });
+                new QRious({
+                    element: document.getElementById('qr-ios'),
+                    value: currentUrls.ios,
+                    size: 260,
+                    level: 'M',
+                    background: '#ffffff',
+                    foreground: '#1e1b4b'
+                });
+            }
+        }
+
+        function setQrBaseMode(mode) {
+            activeMode = mode;
+            const curBtn = document.getElementById('mode-current-btn');
+            const ghBtn = document.getElementById('mode-github-btn');
+            if (mode === 'current') {
+                curBtn.className = 'flex-1 sm:flex-initial px-3.5 py-2 rounded-xl text-xs font-black bg-amber-400 text-slate-950 shadow-sm transition-all';
+                ghBtn.className = 'flex-1 sm:flex-initial px-3.5 py-2 rounded-xl text-xs font-black bg-slate-800 text-slate-300 border border-slate-700 transition-all';
+            } else {
+                ghBtn.className = 'flex-1 sm:flex-initial px-3.5 py-2 rounded-xl text-xs font-black bg-amber-400 text-slate-950 shadow-sm transition-all';
+                curBtn.className = 'flex-1 sm:flex-initial px-3.5 py-2 rounded-xl text-xs font-black bg-slate-800 text-slate-300 border border-slate-700 transition-all';
+            }
+            renderAllQrs();
+        }
+
+        function downloadQrPng(canvasId, fileName, titleText) {
+            const srcCanvas = document.getElementById(canvasId);
+            if (!srcCanvas) return;
+            const out = document.createElement('canvas');
+            out.width = 520;
+            out.height = 600;
+            const ctx = out.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, out.width, out.height);
+
+            ctx.fillStyle = '#0f172a';
+            ctx.font = 'bold 24px Cairo, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(titleText, out.width / 2, 48);
+
+            ctx.drawImage(srcCanvas, 40, 75, 440, 440);
+
+            ctx.fillStyle = '#475569';
+            ctx.font = 'bold 16px Cairo, sans-serif';
+            ctx.fillText('امسح الباركود بكاميرا الهاتف للتنزيل المباشر • v1.0.13', out.width / 2, 555);
+
+            const link = document.createElement('a');
+            link.download = fileName;
+            link.href = out.toDataURL('image/png');
+            link.click();
+        }
+
+        function copyUrl(key) {
+            const text = currentUrls[key] || '';
+            if (!text) return;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text);
+                alert('تم نسخ الرابط المباشر ✓\n' + text);
+            } else {
+                prompt('انسخ الرابط:', text);
+            }
+        }
+
+        // Smart Auto-Action when scanned with ?auto=1
+        (function checkSmartAutoRedirect() {
+            const params = new URLSearchParams(window.location.search);
+            const isAuto = params.get('auto') === '1';
+            const ua = navigator.userAgent || '';
+            const isAndroid = /Android/i.test(ua);
+            const isIOS = /iPhone|iPad|iPod/i.test(ua);
+
+            if (isAuto && (isAndroid || isIOS)) {
+                const banner = document.getElementById('auto-action-banner');
+                const titleEl = document.getElementById('auto-action-title');
+                const descEl = document.getElementById('auto-action-desc');
+                const btnEl = document.getElementById('auto-primary-btn');
+                banner.classList.remove('hidden');
+
+                if (isAndroid) {
+                    titleEl.textContent = '🤖 تم التعرف على هاتف أندرويد — جاري تنزيل التطبيق (APK)...';
+                    descEl.textContent = 'إذا لم يبدأ التنزيل تلقائياً خلال ثانية، اضغط على زر التحميل أدناه:';
+                    btnEl.textContent = '📥 تنزيل تطبيق الأسطة للأندرويد (APK)';
+                    btnEl.href = './AlOsta_App.apk?download=1';
+                    setTimeout(() => {
+                        window.location.href = './AlOsta_App.apk?download=1';
+                    }, 400);
+                } else if (isIOS) {
+                    titleEl.textContent = '🍎 تم التعرف على جهاز آيفون — جاري فتح نسخة الآيفون...';
+                    descEl.textContent = 'سيتم فتح التطبيق الآن؛ اضغط زر المشاركة في Safari ثم اختر "إضافة إلى الشاشة الرئيسية".';
+                    btnEl.textContent = '🍎 فتح تطبيق الأسطة للآيفون الآن';
+                    btnEl.href = './index.html';
+                    setTimeout(() => {
+                        window.location.href = './index.html';
+                    }, 600);
+                }
+            }
+        })();
+
+        renderAllQrs();
+    </script>
+</body>
+</html>

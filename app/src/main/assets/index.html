@@ -476,7 +476,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.13";
+        const APP_VERSION = "1.0.14";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -612,18 +612,23 @@
                 return true;
             };
 
-            const buildLocalQuerySnapshot = (colName, filters) => {
+            const buildLocalQuerySnapshot = (colName, filters, limitCount = 0) => {
                 const colObj = ensureCol(colName);
-                const matchingDocs = Object.keys(colObj)
-                    .filter(id => matchesFilters(colObj[id], filters))
-                    .map(id => {
-                        const copy = { ...colObj[id] };
-                        return {
-                            id,
-                            exists: true,
-                            data: () => copy
-                        };
-                    });
+                let matchingIds = Object.keys(colObj)
+                    .filter(id => matchesFilters(colObj[id], filters));
+                if (limitCount > 0 && matchingIds.length > limitCount) {
+                    matchingIds = matchingIds
+                        .sort((a, b) => ((colObj[b]?.timestamp || 0) - (colObj[a]?.timestamp || 0)))
+                        .slice(0, limitCount);
+                }
+                const matchingDocs = matchingIds.map(id => {
+                    const copy = { ...colObj[id] };
+                    return {
+                        id,
+                        exists: true,
+                        data: () => copy
+                    };
+                });
                 return {
                     empty: matchingDocs.length === 0,
                     docs: matchingDocs
@@ -780,31 +785,35 @@
                 persistStore(!fromCache);
             };
 
-            const createQuery = (colName, filters = []) => {
+            const createQuery = (colName, filters = [], limitCount = 0) => {
                 return {
-                    where: (field, op, val) => createQuery(colName, [...filters, { field, op, val }]),
+                    where: (field, op, val) => createQuery(colName, [...filters, { field, op, val }], limitCount),
+                    limit: (n) => createQuery(colName, filters, Math.max(0, Number(n) || 0)),
                     get: async (options = {}) => {
-                        const localFirst = buildLocalQuerySnapshot(colName, filters);
+                        const localFirst = buildLocalQuerySnapshot(colName, filters, limitCount);
                         if (rawDb && cloudAvailable) {
                             try {
                                 let q = rawDb.collection(colName);
                                 filters.forEach(f => { q = q.where(f.field, f.op, f.val); });
+                                if (limitCount > 0 && typeof q.limit === 'function') {
+                                    q = q.limit(limitCount);
+                                }
                                 const forceServer = Boolean(options && options.source === 'server');
                                 const rawPromise = forceServer ? q.get({ source: 'server' }) : q.get();
                                 const timeoutMs = (options && options.timeoutMs) || (forceServer ? 7500 : (!localFirst.empty ? 2200 : 3500));
                                 const snap = await withCloudTimeout(rawPromise, timeoutMs);
                                 if (snap && Array.isArray(snap.docs)) {
-                                    syncQuerySnapshotToLocal(colName, filters, snap, forceServer);
-                                    return buildLocalQuerySnapshot(colName, filters);
+                                    syncQuerySnapshotToLocal(colName, filters, snap, forceServer && limitCount === 0);
+                                    return buildLocalQuerySnapshot(colName, filters, limitCount);
                                 }
                             } catch (err) {
                                 if (options && options.throwOnError) throw err;
                             }
                         }
-                        return buildLocalQuerySnapshot(colName, filters);
+                        return buildLocalQuerySnapshot(colName, filters, limitCount);
                     },
                     onSnapshot: (cb) => {
-                        const emitLocal = () => cb(buildLocalQuerySnapshot(colName, filters));
+                        const emitLocal = () => cb(buildLocalQuerySnapshot(colName, filters, limitCount));
                         if (!colListeners[colName]) colListeners[colName] = [];
                         colListeners[colName].push(emitLocal);
                         emitLocal();
@@ -814,6 +823,9 @@
                             try {
                                 let q = rawDb.collection(colName);
                                 filters.forEach(f => { q = q.where(f.field, f.op, f.val); });
+                                if (limitCount > 0 && typeof q.limit === 'function') {
+                                    q = q.limit(limitCount);
+                                }
                                 rawUnsub = q.onSnapshot(
                                     (snap) => {
                                         if (snap && snap.docs) {
@@ -842,6 +854,7 @@
                     return {
                         doc: (docId) => createDocRef(colName, docId),
                         where: baseQuery.where,
+                        limit: baseQuery.limit,
                         get: baseQuery.get,
                         onSnapshot: baseQuery.onSnapshot,
                         add: async (data) => {
@@ -872,17 +885,52 @@
                         update: (docRef, data) => {
                             ops.push({ type: 'update', docRef, data });
                         },
-                        set: (docRef, data) => {
-                            ops.push({ type: 'set', docRef, data });
+                        set: (docRef, data, setOpts) => {
+                            ops.push({ type: 'set', docRef, data, setOpts });
                         },
                         delete: (docRef) => {
                             ops.push({ type: 'delete', docRef });
                         },
                         commit: async () => {
+                            if (ops.length === 0) return;
+                            const touchedCols = new Set();
                             for (const op of ops) {
-                                if (op.type === 'update') await op.docRef.update(op.data);
-                                else if (op.type === 'set') await op.docRef.set(op.data);
-                                else if (op.type === 'delete') await op.docRef.delete();
+                                const colName = op.docRef && op.docRef._colName;
+                                const id = op.docRef && op.docRef.id;
+                                if (!colName || !id) continue;
+                                const colObj = ensureCol(colName);
+                                touchedCols.add(colName);
+                                if (op.type === 'update') {
+                                    colObj[id] = applyChangesToLocal(colObj[id] || {}, op.data, true);
+                                } else if (op.type === 'set') {
+                                    const merge = Boolean(op.setOpts && op.setOpts.merge);
+                                    colObj[id] = applyChangesToLocal(colObj[id], op.data, merge);
+                                } else if (op.type === 'delete') {
+                                    delete colObj[id];
+                                }
+                            }
+                            persistStore(true);
+                            touchedCols.forEach(c => notifyCollection(c));
+
+                            if (rawDb && cloudAvailable) {
+                                try {
+                                    if (typeof rawDb.batch === 'function') {
+                                        const fbBatch = rawDb.batch();
+                                        for (const op of ops) {
+                                            const colName = op.docRef && op.docRef._colName;
+                                            const id = op.docRef && op.docRef.id;
+                                            if (!colName || !id) continue;
+                                            const rawRef = rawDb.collection(colName).doc(id);
+                                            if (op.type === 'update') fbBatch.update(rawRef, toRawPatch(op.data));
+                                            else if (op.type === 'set') {
+                                                const merge = Boolean(op.setOpts && op.setOpts.merge);
+                                                if (merge) fbBatch.set(rawRef, toRawPatch(op.data), { merge: true });
+                                                else fbBatch.set(rawRef, toRawPatch(op.data));
+                                            } else if (op.type === 'delete') fbBatch.delete(rawRef);
+                                        }
+                                        await fbBatch.commit();
+                                    }
+                                } catch (e) {}
                             }
                         }
                     };
@@ -4382,6 +4430,71 @@
 
         const NAV_ORDER = ['project', 'stores', 'market', 'workers', 'attendance', 'payroll'];
 
+        const SkeletonList = ({ count = 3, variant = 'card' }) => {
+            const items = Array.from({ length: count });
+            if (variant === 'stores') {
+                return (
+                    <div className="flex gap-2.5 overflow-x-auto hide-scroll pb-1">
+                        {items.map((_, i) => (
+                            <div key={i} className="shrink-0 w-64 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/90 animate-pulse space-y-3">
+                                <div className="flex justify-between items-center">
+                                    <div className="h-4 w-24 bg-slate-200 dark:bg-slate-700 rounded-lg" />
+                                    <div className="h-6 w-6 bg-slate-200 dark:bg-slate-700 rounded-xl" />
+                                </div>
+                                <div className="h-4 w-40 bg-slate-200 dark:bg-slate-700 rounded-lg" />
+                                <div className="h-3 w-32 bg-slate-200 dark:bg-slate-700 rounded-lg" />
+                                <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex justify-between">
+                                    <div className="h-3 w-16 bg-slate-200 dark:bg-slate-700 rounded" />
+                                    <div className="h-3 w-14 bg-slate-200 dark:bg-slate-700 rounded" />
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                );
+            }
+            if (variant === 'products') {
+                return (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {items.map((_, i) => (
+                            <div key={i} className="p-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/60 animate-pulse space-y-2.5">
+                                <div className="flex items-start gap-2.5">
+                                    <div className="w-16 h-16 rounded-2xl bg-slate-200 dark:bg-slate-700 shrink-0" />
+                                    <div className="flex-1 space-y-2 pt-1">
+                                        <div className="h-3 w-16 bg-slate-200 dark:bg-slate-700 rounded" />
+                                        <div className="h-4 w-3/4 bg-slate-200 dark:bg-slate-700 rounded" />
+                                        <div className="h-2.5 w-1/2 bg-slate-200 dark:bg-slate-700 rounded" />
+                                    </div>
+                                </div>
+                                <div className="pt-2 border-t border-slate-200/70 dark:border-slate-800 flex justify-between items-center">
+                                    <div className="h-4 w-20 bg-slate-200 dark:bg-slate-700 rounded" />
+                                    <div className="h-7 w-20 bg-slate-200 dark:bg-slate-700 rounded-xl" />
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                );
+            }
+            return (
+                <div className="space-y-2.5">
+                    {items.map((_, i) => (
+                        <div key={i} className="bg-white/95 dark:bg-slate-800/95 p-3.5 rounded-2xl border border-slate-200/80 dark:border-slate-700 animate-pulse flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-3 flex-1">
+                                <div className="w-12 h-12 rounded-2xl bg-slate-200 dark:bg-slate-700 shrink-0" />
+                                <div className="space-y-2 flex-1">
+                                    <div className="h-4 w-2/5 bg-slate-200 dark:bg-slate-700 rounded-lg" />
+                                    <div className="flex gap-1.5">
+                                        <div className="h-3.5 w-20 bg-slate-200 dark:bg-slate-700 rounded-md" />
+                                        <div className="h-3.5 w-16 bg-slate-200 dark:bg-slate-700 rounded-md" />
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="w-10 h-10 rounded-xl bg-slate-200 dark:bg-slate-700 shrink-0" />
+                        </div>
+                    ))}
+                </div>
+            );
+        };
+
         const AdminApp = ({ adminId, onLogout, addToast }) => {
             const showToast = addToast;
             const { tr, lang } = useContext(AppContext);
@@ -4392,12 +4505,17 @@
             const [selectedProject, setSelectedProject] = useState(null);
             const [focusedProj, setFocusedProj] = useState(null);
             const [data, setData] = useState({ projects: [], workers: [], globalWorkers: [], expenses: [], payments: [], advances: [], attendance: [], requests: [], marketRequests: [], jobAds: [], stores: [], storeProducts: [], storeOrders: [] });
+            const [isInitialSyncing, setIsInitialSyncing] = useState(true);
+            const [marketLoading, setMarketLoading] = useState(false);
+            const [dbQueryLimit, setDbQueryLimit] = useState(400);
             const [modals, setModals] = useState({});
             const [selectedDate, setSelectedDate] = useState(todayStr());
             const [search, setSearch] = useState('');
             const [ledgerFilter, setLedgerFilter] = useState('all');
             const [ledgerMonthFilter, setLedgerMonthFilter] = useState('all');
             const [ledgerPageLimit, setLedgerPageLimit] = useState(40);
+            const [storeProdLimit, setStoreProdLimit] = useState(24);
+            const [storeOrderLimit, setStoreOrderLimit] = useState(20);
             const [marketSearch, setMarketSearch] = useState('');
             const [marketFilter, setMarketFilter] = useState('الكل');
             const [marketGovFilter, setMarketGovFilter] = useState('الكل');
@@ -4660,22 +4778,27 @@
 
             useEffect(() => {
                 if (!db) return;
+                const syncTimer = setTimeout(() => setIsInitialSyncing(false), 650);
                 const unsubs = [
-                    db.collection('projects').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, projects: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('projects').where('adminId', '==', adminId).onSnapshot(s => {
+                        const list = s.docs.map(x => ({ id: x.id, ...x.data() }));
+                        setData(p => ({ ...p, projects: list }));
+                        if (list.length > 0) setIsInitialSyncing(false);
+                    }),
                     db.collection('workers').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, workers: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('expenses').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, expenses: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('payments').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, payments: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('advances').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, advances: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('attendance').where('adminId', '==', adminId).onSnapshot(s => {
+                    db.collection('expenses').where('adminId', '==', adminId).limit(dbQueryLimit).onSnapshot(s => setData(p => ({ ...p, expenses: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('payments').where('adminId', '==', adminId).limit(dbQueryLimit).onSnapshot(s => setData(p => ({ ...p, payments: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('advances').where('adminId', '==', adminId).limit(dbQueryLimit).onSnapshot(s => setData(p => ({ ...p, advances: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('attendance').where('adminId', '==', adminId).limit(dbQueryLimit * 2).onSnapshot(s => {
                         const raw = s.docs.map(x => ({ id: x.id, ...x.data() }));
                         setData(p => ({ ...p, attendance: dedupeAttendanceByWorkerDay(raw, true) }));
                     }),
-                    db.collection('notifications').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, requests: s.docs.map(x => ({ id: x.id, ...x.data() })).filter(r => r.status === 'unread') }))),
-                    db.collection('market_requests').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, marketRequests: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('job_ads').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, jobAds: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('notifications').where('adminId', '==', adminId).limit(150).onSnapshot(s => setData(p => ({ ...p, requests: s.docs.map(x => ({ id: x.id, ...x.data() })).filter(r => r.status === 'unread') }))),
+                    db.collection('market_requests').where('adminId', '==', adminId).limit(150).onSnapshot(s => setData(p => ({ ...p, marketRequests: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('job_ads').where('adminId', '==', adminId).limit(100).onSnapshot(s => setData(p => ({ ...p, jobAds: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
                     // Lightweight active stores list (needed for nearest store banner on project cards)
-                    db.collection('stores').onSnapshot(s => setData(p => ({ ...p, stores: s.docs.map(x => ({ id: x.id, ...x.data() })).filter(st => st.isActive !== false) }))),
-                    db.collection('store_orders').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, storeOrders: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('stores').limit(150).onSnapshot(s => setData(p => ({ ...p, stores: s.docs.map(x => ({ id: x.id, ...x.data() })).filter(st => st.isActive !== false) }))),
+                    db.collection('store_orders').where('adminId', '==', adminId).limit(200).onSnapshot(s => setData(p => ({ ...p, storeOrders: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
                     db.collection('settings').doc('app_config').onSnapshot(docSnap => {
                         if (docSnap.exists) {
                             setAppSettings(prev => ({ ...prev, ...(docSnap.data() || {}) }));
@@ -4699,22 +4822,31 @@
                         }
                     }),
                 ];
-                return () => unsubs.forEach(u => u && u());
-            }, [adminId]);
+                return () => {
+                    clearTimeout(syncTimer);
+                    unsubs.forEach(u => u && u());
+                };
+            }, [adminId, dbQueryLimit]);
 
             // Optimization 1 & 2: Lazy-load Labor Market (only available workers) & Store Products only when their tab/modal is opened
             useEffect(() => {
                 if (!db || view !== 'market') return;
-                const unsubMarket = db.collection('workers').where('isAvailable', '==', true).onSnapshot(s => {
+                setMarketLoading(true);
+                const mTimer = setTimeout(() => setMarketLoading(false), 600);
+                const unsubMarket = db.collection('workers').where('isAvailable', '==', true).limit(200).onSnapshot(s => {
                     setData(p => ({ ...p, globalWorkers: s.docs.map(x => ({ id: x.id, ...x.data() })) }));
+                    setMarketLoading(false);
                 });
-                return () => { if (unsubMarket) unsubMarket(); };
+                return () => {
+                    clearTimeout(mTimer);
+                    if (unsubMarket) unsubMarket();
+                };
             }, [view]);
 
             useEffect(() => {
                 if (!db) return;
                 if (view !== 'stores' && !modals.storeOrder && !modals.exp) return;
-                const unsubProducts = db.collection('store_products').onSnapshot(s => {
+                const unsubProducts = db.collection('store_products').limit(500).onSnapshot(s => {
                     setData(p => ({ ...p, storeProducts: s.docs.map(x => ({ id: x.id, ...x.data() })) }));
                 });
                 let cancelled = false;
@@ -6108,27 +6240,19 @@
                 if (attendanceBusyRef.current[lockKey]) return;
                 attendanceBusyRef.current[lockKey] = true;
                 try {
-                    // Check both local state and Firestore for any existing record on the same day
-                    let matchingDocs = data.attendance.filter(a => a.workerId === workerId && a.date === selectedDate);
-                    try {
-                        const snap = await db.collection('attendance').where('workerId', '==', workerId).get();
-                        const dbMatches = snap.docs
-                            .map(d => ({ id: d.id, ...d.data() }))
-                            .filter(a => a.date === selectedDate);
-                        if (dbMatches.length > 0) {
-                            const map = new Map();
-                            matchingDocs.forEach(m => map.set(m.id, m));
-                            dbMatches.forEach(m => map.set(m.id, m));
-                            matchingDocs = Array.from(map.values());
-                        }
-                    } catch (e) {}
+                    // O(1) in-memory lookup from active snapshot (zero N+1 Firestore roundtrips)
+                    const matchingDocs = data.attendance.filter(a => a.workerId === workerId && a.date === selectedDate);
 
                     if (matchingDocs.length > 0) {
                         const [primary, ...duplicates] = matchingDocs;
-                        for (const dup of duplicates) {
-                            if (dup.id && dup.id !== primary.id) {
-                                try { await db.collection('attendance').doc(dup.id).delete(); } catch (e) {}
-                            }
+                        if (duplicates.length > 0) {
+                            const cleanBatch = db.batch();
+                            duplicates.forEach(dup => {
+                                if (dup.id && dup.id !== primary.id) {
+                                    cleanBatch.delete(db.collection('attendance').doc(dup.id));
+                                }
+                            });
+                            await cleanBatch.commit();
                         }
                         if (primary.status === status && (primary.projectId || !resolveNewAttendanceProjectId(workerId))) {
                             addToast(lang === 'ar' ? 'تم تثبيت حالة حضور هذا اليوم مسبقاً (بدون تكرار الأجر) ✓' : 'Attendance already recorded for this day ✓');
@@ -6169,53 +6293,61 @@
                     const candidateWorkers = (activeAttProj && Array.isArray(activeAttProj.workerIds) && activeAttProj.workerIds.length > 0)
                         ? data.workers.filter(w => activeAttProj.workerIds.includes(w.id))
                         : data.workers;
-                    const unmarked = candidateWorkers.filter(w => !data.attendance.some(a => a.workerId === w.id && a.date === selectedDate));
-                    if (unmarked.length === 0) {
-                        addToast(lang === 'ar' ? 'تم تسجيل جميع العمال لهذا اليوم مسبقاً ✓' : 'All workers already marked for today ✓');
-                        return;
-                    }
+
+                    // Pre-index existing attendance for selectedDate in O(N) — completely eliminates N+1 queries!
+                    const existingByWorker = new Map();
+                    data.attendance.forEach(a => {
+                        if (a.date === selectedDate && a.workerId) {
+                            if (!existingByWorker.has(a.workerId)) existingByWorker.set(a.workerId, []);
+                            existingByWorker.get(a.workerId).push(a);
+                        }
+                    });
+
+                    const batch = db.batch();
                     let addedCount = 0;
-                    for (const w of unmarked) {
-                        const lockKey = `${w.id}_${selectedDate}`;
-                        if (attendanceBusyRef.current[lockKey]) continue;
-                        attendanceBusyRef.current[lockKey] = true;
-                        try {
-                            const snap = await db.collection('attendance').where('workerId', '==', w.id).get();
-                            const existingOnDate = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(a => a.date === selectedDate);
-                            if (existingOnDate.length > 0) {
-                                const [primary, ...dups] = existingOnDate;
-                                for (const dup of dups) {
-                                    if (dup.id && dup.id !== primary.id) {
-                                        try { await db.collection('attendance').doc(dup.id).delete(); } catch (e) {}
-                                    }
+                    const nowTs = Date.now();
+
+                    for (const w of candidateWorkers) {
+                        const existingOnDate = existingByWorker.get(w.id) || [];
+                        if (existingOnDate.length > 0) {
+                            const [primary, ...dups] = existingOnDate;
+                            for (const dup of dups) {
+                                if (dup.id && dup.id !== primary.id) {
+                                    batch.delete(db.collection('attendance').doc(dup.id));
                                 }
-                                if (primary.status !== 'full') {
-                                    await db.collection('attendance').doc(primary.id).update({
-                                        status: 'full',
-                                        projectId: primary.projectId || resolveNewAttendanceProjectId(w.id),
-                                        settled: false
-                                    });
-                                    addedCount++;
-                                }
-                            } else {
-                                await db.collection('attendance').add({
-                                    date: selectedDate,
-                                    workerId: w.id,
+                            }
+                            if (primary.status !== 'full') {
+                                batch.update(db.collection('attendance').doc(primary.id), {
                                     status: 'full',
-                                    adminId,
-                                    projectId: resolveNewAttendanceProjectId(w.id),
-                                    timeIn: Date.now(),
-                                    timeOut: null,
-                                    inStatus: 'manual',
+                                    projectId: primary.projectId || resolveNewAttendanceProjectId(w.id),
                                     settled: false
                                 });
                                 addedCount++;
                             }
-                        } finally {
-                            attendanceBusyRef.current[lockKey] = false;
+                        } else {
+                            const newDocRef = db.collection('attendance').doc();
+                            batch.set(newDocRef, {
+                                date: selectedDate,
+                                workerId: w.id,
+                                status: 'full',
+                                adminId,
+                                projectId: resolveNewAttendanceProjectId(w.id),
+                                timeIn: nowTs,
+                                timeOut: null,
+                                inStatus: 'manual',
+                                settled: false
+                            });
+                            addedCount++;
                         }
                     }
-                    addToast(lang === 'ar' ? `تم تحضير ${addedCount} عامل لهذا اليوم بدون تكرار ✓` : `Marked ${addedCount} workers present ✓`);
+
+                    if (addedCount === 0) {
+                        addToast(lang === 'ar' ? 'تم تسجيل جميع العمال لهذا اليوم مسبقاً ✓' : 'All workers already marked for today ✓');
+                        return;
+                    }
+
+                    await batch.commit();
+                    addToast(lang === 'ar' ? `تم تحضير ${addedCount} عامل دفعة واحدة بدون تكرار ✓` : `Marked ${addedCount} workers present in 1 batch ✓`);
                 } catch (e) {
                     addToast('Error');
                 } finally {
@@ -6242,34 +6374,25 @@
                 if (attendanceBusyRef.current[lockKey]) return;
                 attendanceBusyRef.current[lockKey] = true;
                 try {
-                    await db.collection('notifications').doc(r.id).update({ status: 'approved' });
+                    const batch = db.batch();
+                    batch.update(db.collection('notifications').doc(r.id), { status: 'approved' });
                     // Also mark any duplicate unread clock_in notifications for the same worker & date as approved
                     const sameDayReqs = (data.requests || []).filter(x => x.id !== r.id && x.workerId === r.workerId && x.date === targetDate && x.type !== 'left_site');
                     for (const extraReq of sameDayReqs) {
-                        try { await db.collection('notifications').doc(extraReq.id).update({ status: 'approved' }); } catch (e) {}
+                        batch.update(db.collection('notifications').doc(extraReq.id), { status: 'approved' });
                     }
 
-                    // Check if contractor already recorded attendance for this worker on targetDate
-                    let existingDocs = data.attendance.filter(a => a.workerId === r.workerId && a.date === targetDate);
-                    try {
-                        const snap = await db.collection('attendance').where('workerId', '==', r.workerId).get();
-                        const dbMatches = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(a => a.date === targetDate);
-                        if (dbMatches.length > 0) {
-                            const map = new Map();
-                            existingDocs.forEach(m => map.set(m.id, m));
-                            dbMatches.forEach(m => map.set(m.id, m));
-                            existingDocs = Array.from(map.values());
-                        }
-                    } catch (e) {}
+                    // Check in-memory attendance snapshot (zero redundant .get() N+1 call)
+                    const existingDocs = data.attendance.filter(a => a.workerId === r.workerId && a.date === targetDate);
 
                     if (existingDocs.length > 0) {
                         const [primary, ...duplicates] = existingDocs;
                         for (const dup of duplicates) {
                             if (dup.id && dup.id !== primary.id) {
-                                try { await db.collection('attendance').doc(dup.id).delete(); } catch (e) {}
+                                batch.delete(db.collection('attendance').doc(dup.id));
                             }
                         }
-                        await db.collection('attendance').doc(primary.id).update({
+                        batch.update(db.collection('attendance').doc(primary.id), {
                             status: primary.status && primary.status !== 'absent' ? primary.status : 'full',
                             projectId: r.projectId || primary.projectId || null,
                             timeIn: primary.timeIn || r.timeIn || Date.now(),
@@ -6280,9 +6403,11 @@
                             effortScore: Math.max(primary.stepEngineV2 ? (primary.effortScore || 0) : 0, r.stepEngineV2 ? (r.effortScore || 0) : 0),
                             stepEngineV2: true
                         });
+                        await batch.commit();
                         addToast(lang === 'ar' ? 'الحضور مسجل مسبقاً لهذا اليوم — تم ربط بصمة الموقع بدون تكرار الأجر ✓' : 'Attendance already recorded for today — merged GPS check-in ✓');
                     } else {
-                        await db.collection('attendance').add({
+                        const newAttRef = db.collection('attendance').doc();
+                        batch.set(newAttRef, {
                             date: targetDate,
                             workerId: r.workerId,
                             status: 'full',
@@ -6297,6 +6422,7 @@
                             stepEngineV2: true,
                             settled: false
                         });
+                        await batch.commit();
                         addToast(lang === 'ar' ? 'تم قبول الحضور ✓' : 'Approved ✓');
                     }
                 } catch (e) {
@@ -6650,7 +6776,9 @@
                                             </button>
                                         </div>
 
-                                        {data.projects.length === 0 ? (
+                                        {isInitialSyncing && data.projects.length === 0 ? (
+                                            <SkeletonList count={3} variant="card" />
+                                        ) : data.projects.length === 0 ? (
                                             <div className="bg-white/90 dark:bg-slate-800/90 border border-dashed border-indigo-200 dark:border-slate-700 rounded-3xl p-8 text-center">
                                                 <div className="w-12 h-12 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 rounded-2xl flex items-center justify-center mx-auto mb-3">
                                                     <Icon name="layout-grid" size={24} />
@@ -7305,6 +7433,10 @@
                                                     return st.storeType === storeFilter || (storeFilter !== 'general' && st.storeType === 'both');
                                                 });
 
+                                                if (storeRefreshing && visibleStores.length === 0) {
+                                                    return <SkeletonList count={3} variant="stores" />;
+                                                }
+
                                                 if (visibleStores.length === 0) {
                                                     return (
                                                         <div className="bg-slate-50 dark:bg-slate-900/70 border border-dashed border-slate-300 dark:border-slate-700 rounded-2xl p-6 text-center space-y-2">
@@ -7751,6 +7883,10 @@
                                                             return 0;
                                                         });
 
+                                                    if (storeRefreshing && showroomProducts.length === 0) {
+                                                        return <SkeletonList count={4} variant="products" />;
+                                                    }
+
                                                     if (showroomProducts.length === 0) {
                                                         return (
                                                             <div className="bg-slate-50 dark:bg-slate-900/60 border border-dashed border-slate-300 dark:border-slate-700 rounded-2xl p-6 text-center space-y-2.5">
@@ -7782,9 +7918,13 @@
                                                         );
                                                     }
 
+                                                    const pagedShowroomProducts = showroomProducts.slice(0, storeProdLimit);
+                                                    const hasMoreStoreProducts = showroomProducts.length > storeProdLimit;
+
                                                     return (
+                                                        <div className="space-y-3">
                                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                                                            {showroomProducts.map(prod => {
+                                                            {pagedShowroomProducts.map(prod => {
                                                                 const matchingCartLines = ecomCart.filter(c => (c.productId || c.id) === prod.id);
                                                                 const totalProdQtyInCart = matchingCartLines.reduce((s, c) => s + c.qty, 0);
                                                                 const inCart = matchingCartLines[0] || null;
@@ -7938,6 +8078,21 @@
                                                                 );
                                                             })}
                                                         </div>
+                                                        {hasMoreStoreProducts && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => { haptic(); setStoreProdLimit(l => l + 24); }}
+                                                                className="w-full py-2.5 bg-slate-100 dark:bg-slate-700/80 hover:bg-indigo-50 dark:hover:bg-slate-700 text-indigo-600 dark:text-indigo-300 rounded-2xl text-xs font-black flex items-center justify-center gap-1.5 active:scale-95 transition-all"
+                                                            >
+                                                                <span>⬇️</span>
+                                                                <span>
+                                                                    {lang === 'ar'
+                                                                        ? `عرض المزيد من المنتجات (${showroomProducts.length - storeProdLimit} متبقية)`
+                                                                        : `Load More Products (${showroomProducts.length - storeProdLimit} remaining)`}
+                                                                </span>
+                                                            </button>
+                                                        )}
+                                                        </div>
                                                     );
                                                 })()}
                                             </div>
@@ -7975,6 +8130,7 @@
                                             <div className="space-y-2.5">
                                                 {[...(data.storeOrders || [])]
                                                     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+                                                    .slice(0, storeOrderLimit)
                                                     .map(ord => {
                                                         const projObj = data.projects.find(p => p.id === ord.projectId);
                                                         const storeObj = effectiveStoresList.find(s => s.id === ord.storeId) || { name: ord.storeName, phone: ord.storePhone };
@@ -8064,6 +8220,20 @@
                                                             </div>
                                                         );
                                                     })}
+                                                {(data.storeOrders || []).length > storeOrderLimit && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => { haptic(); setStoreOrderLimit(l => l + 20); }}
+                                                        className="w-full py-2.5 bg-slate-100 dark:bg-slate-700/80 text-indigo-600 dark:text-indigo-300 rounded-2xl text-xs font-black flex items-center justify-center gap-1.5 active:scale-95"
+                                                    >
+                                                        <span>⬇️</span>
+                                                        <span>
+                                                            {lang === 'ar'
+                                                                ? `عرض المزيد من الطلبيات (${(data.storeOrders || []).length - storeOrderLimit} متبقية)`
+                                                                : `Load More Orders (${(data.storeOrders || []).length - storeOrderLimit} remaining)`}
+                                                        </span>
+                                                    </button>
+                                                )}
                                             </div>
                                         )}
                                     </div>
@@ -8185,7 +8355,9 @@
                                 </div>
 
                                 <div className="grid grid-cols-1 gap-3">
-                                    {(() => {
+                                    {marketLoading && data.globalWorkers.length === 0 ? (
+                                        <SkeletonList count={4} variant="card" />
+                                    ) : (() => {
                                         const ITEMS_PER_PAGE = 20;
                                         const filteredWorkers = data.globalWorkers
                                             .filter(w => isWorkerProfileRegistered(w))
@@ -8301,15 +8473,23 @@
                                 <button onClick={() => setModals({ work: true })} className="w-full p-3.5 border-2 border-dashed border-indigo-300 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 font-black rounded-2xl flex justify-center items-center gap-2 btn-press mb-2 bg-indigo-50/50 dark:bg-indigo-900/10">
                                     <Icon name="user-plus" size={18} /> {tr('addWorker')}
                                 </button>
+                                {isInitialSyncing && (data.workers || []).length === 0 ? (
+                                    <SkeletonList count={3} variant="card" />
+                                ) : (
                                 <div className="grid grid-cols-1 gap-2.5">
                                     {(data.workers || []).map(w => {
-                                        const officialWage = getOfficialWorkerWage(w);
-                                        const activeDays = data.attendance.filter(a => a.workerId === w.id && a.status !== 'absent' && !a.settled).length;
-                                        const wageEarned = data.attendance.filter(a => a.workerId === w.id && !a.settled).reduce((s, a) => s + calcWage(a.status, officialWage), 0);
-                                        const workerMatCredit = data.expenses.filter(e => e.paidByWorkerId === w.id && !e.settled).reduce((s, e) => s + (Number(e.cost) || 0), 0);
-                                        const earned = wageEarned + workerMatCredit;
-                                        const advances = data.advances.filter(a => a.workerId === w.id && !a.settled).reduce((s, a) => s + (Number(a.amount) || 0), 0);
-                                        const currentDue = earned - advances;
+                                        // O(1) pre-indexed worker stats lookup (eliminates 4x O(N) array scans per worker card)
+                                        const wStats = indexedLedger && typeof indexedLedger.getWorkerStats === 'function'
+                                            ? indexedLedger.getWorkerStats(w.id)
+                                            : null;
+                                        const officialWage = wStats ? wStats.officialWage : getOfficialWorkerWage(w);
+                                        const activeDays = wStats ? wStats.activeDays : data.attendance.filter(a => a.workerId === w.id && a.status !== 'absent' && !a.settled).length;
+                                        const workerMatCredit = wStats ? wStats.workerMatCredit : data.expenses.filter(e => e.paidByWorkerId === w.id && !e.settled).reduce((s, e) => s + (Number(e.cost) || 0), 0);
+                                        const currentDue = wStats ? wStats.currentDue : (
+                                            data.attendance.filter(a => a.workerId === w.id && !a.settled).reduce((s, a) => s + calcWage(a.status, officialWage), 0)
+                                            + workerMatCredit
+                                            - data.advances.filter(a => a.workerId === w.id && !a.settled).reduce((s, a) => s + (Number(a.amount) || 0), 0)
+                                        );
                                         const waPhone = formatWhatsAppPhone(w.phone);
 
                                         return (
@@ -8465,6 +8645,7 @@
                                         );
                                     })}
                                 </div>
+                                )}
                             </div>
                         )}
 
@@ -14310,8 +14491,8 @@
         };
         ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     </script>
-    <script src="./vendor/alosta-engine.js?v=v1_0_13"></script>
-    <script src="./vendor/app-compiled.js?v=v1_0_13"></script>
+    <script src="./vendor/alosta-engine.js?v=v1_0_14"></script>
+    <script src="./vendor/app-compiled.js?v=v1_0_14"></script>
 </body>
 
 </html>
