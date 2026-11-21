@@ -6,6 +6,25 @@ const { spawn } = require('child_process');
 
 const PORT = process.env.DEFAULT_APP_PORT || 3000;
 const ASSETS_DIR = path.join(__dirname, 'app', 'src', 'main', 'assets');
+const PORTAL_VERSION = '1.0.17';
+const GITHUB_PAGES_BASE = 'https://waadpc90-ctrl.github.io/alustadh/';
+const GITHUB_APK_URL = 'https://github.com/waadpc90-ctrl/alustadh/raw/main/AlOsta_App.apk';
+
+const ALLOWED_ORIGINS = new Set([
+  'https://waadpc90-ctrl.github.io',
+  'https://craftsmanapp-3e46b.web.app',
+  'https://craftsmanapp-3e46b.firebaseapp.com',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000'
+]);
+
+const isOriginAllowed = (origin) => {
+  if (!origin) return false;
+  if (ALLOWED_ORIGINS.has(origin)) return true;
+  if (/^https:\/\/[a-z0-9-]+\.(run\.app|trycloudflare\.com)$/i.test(origin)) return true;
+  if (/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) return true;
+  return false;
+};
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -27,31 +46,28 @@ let currentPublicTunnelUrl = '';
 
 async function updateFirestorePortalUrl(tunnelUrl) {
   if (!tunnelUrl) return;
+  // Require explicit platform admin bearer token; never attempt unauthenticated Firestore writes
+  const adminToken = String(process.env.FIREBASE_ADMIN_TOKEN || '').trim();
+  if (!adminToken) return;
   try {
-    const base = tunnelUrl.endsWith('/') ? tunnelUrl : (tunnelUrl + '/');
-    const apkDirectUrl = 'https://github.com/waadpc90-ctrl/alosta-app/raw/main/AlOsta_App.apk';
-    const dashApkDirectUrl = '';
-    const endpoint = 'https://firestore.googleapis.com/v1/projects/craftsmanapp-3e46b/databases/(default)/documents/settings/app_config?updateMask.fieldPaths=portalBaseUrl&updateMask.fieldPaths=apkUrl&updateMask.fieldPaths=rawApkUrl&updateMask.fieldPaths=dashboardApkUrl&updateMask.fieldPaths=latestVersion&updateMask.fieldPaths=latestDashboardVersion&updateMask.fieldPaths=forceUpdate&updateMask.fieldPaths=stopUpdate&updateMask.fieldPaths=pushUpdateToken&updateMask.fieldPaths=pushTargetVersion';
+    const endpoint = 'https://firestore.googleapis.com/v1/projects/craftsmanapp-3e46b/databases/(default)/documents/settings/app_config?updateMask.fieldPaths=portalBaseUrl&updateMask.fieldPaths=apkUrl&updateMask.fieldPaths=rawApkUrl&updateMask.fieldPaths=latestVersion';
     const res = await fetch(endpoint, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${adminToken}`
+      },
       body: JSON.stringify({
         fields: {
-          portalBaseUrl: { stringValue: 'https://waadpc90-ctrl.github.io/alosta-app/' },
-          apkUrl: { stringValue: apkDirectUrl },
-          rawApkUrl: { stringValue: apkDirectUrl },
-          dashboardApkUrl: { stringValue: dashApkDirectUrl },
-          latestVersion: { stringValue: '1.0.12' },
-          latestDashboardVersion: { stringValue: '1.0.12' },
-          forceUpdate: { booleanValue: true },
-          stopUpdate: { booleanValue: false },
-          pushUpdateToken: { stringValue: '' },
-          pushTargetVersion: { stringValue: '' }
+          portalBaseUrl: { stringValue: GITHUB_PAGES_BASE },
+          apkUrl: { stringValue: GITHUB_APK_URL },
+          rawApkUrl: { stringValue: GITHUB_APK_URL },
+          latestVersion: { stringValue: PORTAL_VERSION }
         }
       })
     });
     if (res.ok) {
-      console.log('Synced public portalBaseUrl & apkUrl (v1.0.12) to Firestore:', apkDirectUrl);
+      console.log(`Synced portalBaseUrl & apkUrl (v${PORTAL_VERSION}) to Firestore:`, GITHUB_APK_URL);
     }
   } catch (err) {
     console.error('Failed to sync portalBaseUrl:', err.message);
@@ -89,12 +105,23 @@ const server = http.createServer((req, res) => {
     const parsedUrl = url.parse(req.url || '/', true);
     let pathname = decodeURIComponent(parsedUrl.pathname || '/');
 
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const reqOrigin = req.headers.origin;
+    if (isOriginAllowed(reqOrigin)) {
+      res.setHeader('Access-Control-Allow-Origin', reqOrigin);
+      res.setHeader('Vary', 'Origin');
+    }
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('Cache-Control', 'no-cache');
 
     if (pathname === '/__portal_status') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ ok: true, publicUrl: currentPublicTunnelUrl }));
+      res.end(JSON.stringify({
+        ok: true,
+        version: PORTAL_VERSION,
+        portalBaseUrl: GITHUB_PAGES_BASE,
+        publicUrl: currentPublicTunnelUrl
+      }));
       return;
     }
 
@@ -160,11 +187,11 @@ const server = http.createServer((req, res) => {
     }
 
     if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
-      filePath = path.join(filePath, 'dashboard.html');
+      filePath = path.join(filePath, 'index.html');
     }
 
     if (!fs.existsSync(filePath)) {
-      filePath = path.join(ASSETS_DIR, 'dashboard.html');
+      filePath = path.join(ASSETS_DIR, 'index.html');
     }
 
     const ext = path.extname(filePath).toLowerCase();
@@ -193,6 +220,6 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Al-Osta Web & Store Portal Server listening on http://0.0.0.0:${PORT}`);
+  console.log(`Al-Osta Web & Store Portal Server v${PORTAL_VERSION} listening on http://0.0.0.0:${PORT}`);
   startCloudflaredTunnel();
 });

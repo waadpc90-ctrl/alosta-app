@@ -3,7 +3,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     function isAuthenticated() {
-      return request.auth != null;
+      return request.auth != null && request.auth.uid != null;
     }
 
     function isValidPayloadSize() {
@@ -18,7 +18,16 @@ service cloud.firestore {
 
     function hasValidNonNegNumber(field) {
       return !(field in request.resource.data) ||
-             (request.resource.data[field] is number && request.resource.data[field] >= 0 && request.resource.data[field] <= 1000000000000);
+             (request.resource.data[field] is number &&
+              request.resource.data[field] >= 0 &&
+              request.resource.data[field] <= 1000000000000);
+    }
+
+    function hasValidBoundedNumber(field, minVal, maxVal) {
+      return !(field in request.resource.data) ||
+             (request.resource.data[field] is number &&
+              request.resource.data[field] >= minVal &&
+              request.resource.data[field] <= maxVal);
     }
 
     function isPlatformAdmin() {
@@ -27,22 +36,107 @@ service cloud.firestore {
              request.auth.token.email_verified == true;
     }
 
-    // Global app settings: readable by all apps, writable ONLY by verified platform admin (or Admin REST/Console)
+    // Tenant ownership check for accounts that have bound their Firebase Auth UID.
+    // Accounts not yet bound (legacy) may bind on next verified login; once bound,
+    // sensitive credential/subscription tampering by foreign sessions is blocked.
+    function isBoundAccountOwner(existingData) {
+      return isPlatformAdmin() ||
+             !('boundAuthUid' in existingData) ||
+             existingData.boundAuthUid == null ||
+             existingData.boundAuthUid == '' ||
+             existingData.boundAuthUid == 'local_auth' ||
+             existingData.boundAuthUid == request.auth.uid;
+    }
+
+    // Prevent non-platform-admins from self-escalating paid subscription/verification flags
+    function didNotEscalateSubscription(existingData, newData) {
+      return isPlatformAdmin() || (
+        (!('isVerifiedPro' in newData) || newData.isVerifiedPro == existingData.get('isVerifiedPro', false)) &&
+        (!('isVipStore' in newData) || newData.isVipStore == existingData.get('isVipStore', false)) &&
+        (!('subscriptionExpiresAt' in newData) || newData.subscriptionExpiresAt == existingData.get('subscriptionExpiresAt', null))
+      );
+    }
+
+    // Prevent contractors/foreign callers from overwriting a worker's passwordHash/loginCodeHash
+    function didNotTamperCredentials(existingData, newData) {
+      return isBoundAccountOwner(existingData) || (
+        (!('passwordHash' in newData) || newData.passwordHash == existingData.get('passwordHash', null)) &&
+        (!('passwordCipher' in newData) || newData.passwordCipher == existingData.get('passwordCipher', null)) &&
+        (!('password' in newData) || newData.password == existingData.get('password', null))
+      );
+    }
+
+    // Global app settings: readable by all apps, writable ONLY by verified platform admin
     match /settings/{docId} {
       allow read: if true;
       allow write: if isPlatformAdmin() && isValidPayloadSize();
     }
 
-    match /admins/{adminId} {
-      allow read: if isAuthenticated();
-      allow create, update: if isAuthenticated() && isValidPayloadSize();
-      allow delete: if false;
+    // Global platform announcements: readable by all apps, writable ONLY by verified platform admin
+    match /announcements/{annId} {
+      allow read: if true;
+      allow write: if isPlatformAdmin() && isValidPayloadSize();
     }
 
+    // Contractor (admin) profiles: protect credentials & paid flags against cross-session tampering
+    match /admins/{adminId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() &&
+                       isValidPayloadSize() &&
+                       (!('isVerifiedPro' in request.resource.data) || request.resource.data.isVerifiedPro == false || isPlatformAdmin());
+      allow update: if isAuthenticated() &&
+                       isValidPayloadSize() &&
+                       didNotTamperCredentials(resource.data, request.resource.data) &&
+                       didNotEscalateSubscription(resource.data, request.resource.data);
+      allow delete: if isPlatformAdmin();
+    }
+
+    // Worker profiles: lightweight profile & market card (high-frequency telemetry moved to worker_telemetry)
     match /workers/{workerId} {
       allow read: if isAuthenticated();
-      allow create, update: if isAuthenticated() && isValidPayloadSize() && hasValidNonNegNumber('wage');
+      allow create: if isAuthenticated() &&
+                       isValidPayloadSize() &&
+                       hasValidNonNegNumber('wage') &&
+                       hasValidNonNegNumber('contractorWage') &&
+                       hasValidNonNegNumber('marketWage') &&
+                       hasValidBoundedNumber('ratingScore', 0, 6) &&
+                       (!('isVerifiedPro' in request.resource.data) || request.resource.data.isVerifiedPro == false || isPlatformAdmin());
+      allow update: if isAuthenticated() &&
+                       isValidPayloadSize() &&
+                       hasValidNonNegNumber('wage') &&
+                       hasValidNonNegNumber('contractorWage') &&
+                       hasValidNonNegNumber('marketWage') &&
+                       hasValidBoundedNumber('ratingScore', 0, 6) &&
+                       didNotTamperCredentials(resource.data, request.resource.data) &&
+                       didNotEscalateSubscription(resource.data, request.resource.data);
+      allow delete: if isAuthenticated() && isBoundAccountOwner(resource.data);
+    }
+
+    // Dedicated high-frequency shift telemetry collection (eliminates Labor Market read fanout!)
+    match /worker_telemetry/{workerId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() &&
+                               isValidPayloadSize() &&
+                               hasValidBoundedNumber('todaySteps', 0, 200000) &&
+                               hasValidBoundedNumber('todayDistanceMeters', 0, 200000) &&
+                               hasValidBoundedNumber('todayEffortScore', 0, 100) &&
+                               hasValidBoundedNumber('todayEffortStars', 0, 6) &&
+                               hasValidBoundedNumber('todayActiveMinutes', 0, 1440);
       allow delete: if isAuthenticated();
+    }
+
+    // Worker ratings submitted by contractors (1..6 scale, append-only / non-deletable)
+    match /ratings/{ratingId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() &&
+                               isValidPayloadSize() &&
+                               hasValidAdminId() &&
+                               request.resource.data.workerId is string &&
+                               request.resource.data.workerId.size() >= 1 &&
+                               hasValidBoundedNumber('punctuality', 1, 6) &&
+                               hasValidBoundedNumber('quality', 1, 6) &&
+                               hasValidBoundedNumber('avgScore', 1, 6);
+      allow delete: if isPlatformAdmin();
     }
 
     match /projects/{projectId} {
@@ -53,7 +147,11 @@ service cloud.firestore {
 
     match /attendance/{attId} {
       allow read: if isAuthenticated();
-      allow create, update: if isAuthenticated() && isValidPayloadSize();
+      allow create, update: if isAuthenticated() &&
+                               isValidPayloadSize() &&
+                               hasValidBoundedNumber('steps', 0, 200000) &&
+                               hasValidBoundedNumber('effortScore', 0, 100) &&
+                               hasValidBoundedNumber('activeMinutes', 0, 1440);
       allow delete: if isAuthenticated();
     }
 
@@ -101,8 +199,13 @@ service cloud.firestore {
 
     match /stores/{storeId} {
       allow read: if true;
-      allow create, update: if isAuthenticated() && isValidPayloadSize();
-      allow delete: if isAuthenticated();
+      allow create: if isAuthenticated() &&
+                       isValidPayloadSize() &&
+                       (!('isVipStore' in request.resource.data) || request.resource.data.isVipStore == false || isPlatformAdmin());
+      allow update: if isAuthenticated() &&
+                       isValidPayloadSize() &&
+                       didNotEscalateSubscription(resource.data, request.resource.data);
+      allow delete: if isPlatformAdmin();
     }
 
     match /store_products/{prodId} {
@@ -117,9 +220,12 @@ service cloud.firestore {
       allow delete: if isAuthenticated();
     }
 
+    // Decoupled content-addressed image blobs (keeps store_products & stores documents lightweight)
     match /media_blobs/{blobId} {
       allow read: if true;
-      allow create, update: if isAuthenticated() && isValidPayloadSize();
+      allow create, update: if isAuthenticated() &&
+                               isValidPayloadSize() &&
+                               hasValidBoundedNumber('sizeBytes', 1, 250000);
       allow delete: if isAuthenticated();
     }
 

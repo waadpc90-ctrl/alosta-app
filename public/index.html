@@ -30,6 +30,12 @@
             window.IS_IOS_SAFARI = isSafari;
             window.IS_IOS_INAPP = isIos && !isSafari;
             window.IS_IOS_STANDALONE = Boolean(window.navigator.standalone === true || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches));
+            if (window.IS_IOS_DEVICE) {
+                document.documentElement.classList.add('ios-device');
+            }
+            if (window.IS_IOS_STANDALONE) {
+                document.documentElement.classList.add('ios-standalone');
+            }
             window.__deferredInstallPrompt = null;
             window.addEventListener('beforeinstallprompt', function (e) {
                 e.preventDefault();
@@ -95,6 +101,16 @@
     <script src="./vendor/firebase-firestore.js"></script>
 
     <style>
+        :root {
+            --dock-bottom-gap: 10px;
+        }
+        @supports (padding-bottom: env(safe-area-inset-bottom)) {
+            :root {
+                /* Grounded floating dock above iPhone Home Indicator (~18px instead of 44px void) */
+                --dock-bottom-gap: clamp(10px, calc(env(safe-area-inset-bottom) - 16px), 18px);
+            }
+        }
+
         html, body, #root {
             width: 100%;
             height: 100%;
@@ -102,6 +118,28 @@
             min-height: 100%;
             margin: 0;
             padding: 0;
+            background-color: #eef2ff;
+        }
+        html.dark, html.dark body, html.dark #root {
+            background-color: #070b14;
+        }
+
+        /* Fix WebKit iOS Standalone PWA bug where 100dvh shrinks by ~44-60px and lifts bottom nav bar */
+        html.ios-standalone,
+        html.ios-standalone body,
+        html.ios-standalone #root,
+        html.ios-standalone .app-height {
+            height: 100vh !important;
+            height: 100lvh !important;
+            min-height: 100vh !important;
+            min-height: -webkit-fill-available !important;
+        }
+        @media all and (display-mode: standalone) {
+            html, body, #root, .app-height {
+                height: 100vh !important;
+                height: 100lvh !important;
+                min-height: 100vh !important;
+            }
         }
 
         body {
@@ -233,9 +271,12 @@
             left: 0;
             right: 0;
             z-index: 50;
-            padding: 0 10px calc(10px + env(safe-area-inset-bottom)) 10px;
+            padding: 0 10px var(--dock-bottom-gap, 10px) 10px;
             pointer-events: none;
             background: linear-gradient(to top, rgba(241, 245, 249, 0.92) 20%, transparent 100%);
+        }
+        .fab-above-dock {
+            bottom: calc(74px + var(--dock-bottom-gap, 10px));
         }
         .dark .nav-dock-wrapper {
             background: linear-gradient(to top, rgba(6, 10, 18, 0.94) 20%, transparent 100%);
@@ -9355,7 +9396,7 @@
                     {speedDialOpen && (
                         <div className="fixed inset-0 bg-black/40 backdrop-blur-xs z-40 no-print" onClick={() => setSpeedDialOpen(false)}></div>
                     )}
-                    <div className={`fixed bottom-24 ${lang === 'ar' ? 'left-4' : 'right-4'} z-50 flex flex-col items-end gap-2 no-print`}>
+                    <div className={`fixed fab-above-dock ${lang === 'ar' ? 'left-4' : 'right-4'} z-50 flex flex-col items-end gap-2 no-print`}>
                         {speedDialOpen && (
                             <div className="flex flex-col gap-2 mb-1 animate-enter">
                                 <button
