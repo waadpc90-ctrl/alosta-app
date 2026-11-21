@@ -13,7 +13,10 @@ val detectedVersionName = if (indexHtmlAsset.exists()) {
   Regex("""const\s+APP_VERSION\s*=\s*"(\d+\.\d+\.\d+)";""")
     .find(indexHtmlAsset.readText())?.groupValues?.get(1) ?: "1.0.11"
 } else "1.0.11"
-val detectedVersionCode = detectedVersionName.substringAfterLast('.').toIntOrNull() ?: 11
+val detectedVersionParts = detectedVersionName.split('.').map { it.toIntOrNull() ?: 0 }
+val detectedVersionCode = (detectedVersionParts.getOrElse(0) { 1 } * 10000) +
+  (detectedVersionParts.getOrElse(1) { 0 } * 100) +
+  detectedVersionParts.getOrElse(2) { 15 }
 
 android {
   namespace = "com.example"

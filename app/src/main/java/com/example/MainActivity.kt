@@ -30,6 +30,7 @@ import android.print.PrintManager
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -112,17 +113,19 @@ open class MainActivity : ComponentActivity() {
             android.graphics.drawable.ColorDrawable(android.graphics.Color.parseColor("#EEF2FF"))
         )
         createNotificationChannel()
+        // Only clear WebView disk caches when the installed app version actually changes
+        // (preserves warm-start performance, fonts, and image cache across normal launches)
         try {
-            java.io.File(filesDir, "wv_cdn_cache").deleteRecursively()
-            java.io.File(filesDir, "jsx_compiled_cache").deleteRecursively()
-            cacheDir?.deleteRecursively()
-            codeCacheDir?.deleteRecursively()
-            val dataDirFile = java.io.File(applicationInfo.dataDir)
-            java.io.File(dataDirFile, "app_webview/Default/Code Cache").deleteRecursively()
-            java.io.File(dataDirFile, "app_webview/Default/Cache").deleteRecursively()
-            java.io.File(dataDirFile, "app_webview/Default/GPUCache").deleteRecursively()
-            java.io.File(dataDirFile, "cache/WebView").deleteRecursively()
-            java.io.File(dataDirFile, "code_cache/WebView").deleteRecursively()
+            val cachePrefs = getSharedPreferences("al_osta_cache_meta", Context.MODE_PRIVATE)
+            val lastCacheVersion = cachePrefs.getInt("last_version_code", -1)
+            if (lastCacheVersion != BuildConfig.VERSION_CODE) {
+                java.io.File(filesDir, "wv_cdn_cache").deleteRecursively()
+                java.io.File(filesDir, "jsx_compiled_cache").deleteRecursively()
+                val dataDirFile = java.io.File(applicationInfo.dataDir)
+                java.io.File(dataDirFile, "app_webview/Default/Code Cache").deleteRecursively()
+                java.io.File(dataDirFile, "app_webview/Default/Cache").deleteRecursively()
+                cachePrefs.edit().putInt("last_version_code", BuildConfig.VERSION_CODE).apply()
+            }
         } catch (_: Exception) {
         }
 
@@ -161,6 +164,18 @@ open class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         AlOstaApkUpdater.onActivityResume(this)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        AlOstaLocationManager.pauseIfIdle(this)
+        WorkerStepTracker.flushPendingDiskWrite(this)
+    }
+
+    override fun onDestroy() {
+        AlOstaLocationManager.stopTracking(this)
+        WorkerStepTracker.flushPendingDiskWrite(this)
+        super.onDestroy()
     }
 
     private fun createNotificationChannel() {
@@ -285,8 +300,13 @@ object AlOstaSecurityVault {
                 host == "0.0.0.0" ||
                 host == "::1" ||
                 host == "10.0.2.2" ||
+                host.startsWith("10.") ||
                 host.startsWith("127.") ||
-                host.startsWith("169.254.")
+                host.startsWith("169.254.") ||
+                host.startsWith("192.168.") ||
+                host.startsWith("fc") ||
+                host.startsWith("fd") ||
+                Regex("""^172\.(1[6-9]|2\d|3[01])\.""").containsMatchIn(host)
             ) {
                 return false
             }
@@ -321,6 +341,7 @@ object AlOstaSecurityVault {
 
 object WorkerStepTracker : SensorEventListener {
     private const val PREF_FILE = "al_osta_step_prefs_v2"
+    private const val IDLE_THRESHOLD_MS = 10 * 60 * 1000L
     private var isRegistered = false
     private var appContext: Context? = null
     private var hasStepCounterSensor = false
@@ -336,6 +357,35 @@ object WorkerStepTracker : SensorEventListener {
     private var lastStepCounterEventMs = 0L
     private var lastHardwareStepMs = 0L
 
+    // In-memory live cache to avoid hammering SharedPreferences flash storage on every sensor tick
+    @Volatile
+    private var cachedWorkerDayKey: String = ""
+    @Volatile
+    private var cachedStepsKey: String = ""
+    @Volatile
+    private var cachedDailySteps: Int = -1
+    @Volatile
+    private var cachedActiveMinutes: Int = 0
+    @Volatile
+    private var cachedLastActiveBucket: Long = -1L
+    @Volatile
+    private var cachedLastStepAtMs: Long = 0L
+    @Volatile
+    private var cachedLastMotionAtMs: Long = 0L
+    @Volatile
+    private var lastDiskFlushMs: Long = 0L
+    @Volatile
+    private var dirtyStepsPending: Boolean = false
+
+    // Rolling 10-minute telemetry buckets (minuteEpoch -> step count / motion presence)
+    private val recentStepBuckets = LinkedHashMap<Long, Int>()
+    private val recentMotionBuckets = LinkedHashSet<Long>()
+
+    // Stationary trade work motion detector (detects sustained manual work without faking footsteps)
+    private var lastWorkMotionSampleMs = 0L
+    private var motionWindowStartMs = 0L
+    private var motionImpulseCount = 0
+
     // Anti-noise low-pass gravity & multi-step cadence state for accelerometer / detector
     private var gravityEstimate = 9.81f
     private var awaitingTrough = false
@@ -350,14 +400,146 @@ object WorkerStepTracker : SensorEventListener {
         return SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
     }
 
-    private fun workerStepsKey(today: String, workerId: String): String {
+    private fun workerDayId(today: String, workerId: String): String {
         val safeId = workerId.ifBlank { "default" }
-        return "steps_${today}_$safeId"
+        return "${today}_$safeId"
+    }
+
+    private fun workerStepsKey(today: String, workerId: String): String {
+        return "steps_${workerDayId(today, workerId)}"
     }
 
     private fun workerBaselineKey(today: String, workerId: String): String {
-        val safeId = workerId.ifBlank { "default" }
-        return "baseline_${today}_$safeId"
+        return "baseline_${workerDayId(today, workerId)}"
+    }
+
+    private fun workerActiveMinKey(today: String, workerId: String): String {
+        return "active_min_${workerDayId(today, workerId)}"
+    }
+
+    private fun workerActiveBucketKey(today: String, workerId: String): String {
+        return "active_bucket_${workerDayId(today, workerId)}"
+    }
+
+    private fun workerLastStepKey(today: String, workerId: String): String {
+        return "last_step_ms_${workerDayId(today, workerId)}"
+    }
+
+    private fun workerLastMotionKey(today: String, workerId: String): String {
+        return "last_motion_ms_${workerDayId(today, workerId)}"
+    }
+
+    private fun ensureCacheLoaded(prefs: android.content.SharedPreferences, today: String, workerId: String) {
+        val dayKey = workerDayId(today, workerId)
+        val stepsKey = workerStepsKey(today, workerId)
+        if (cachedWorkerDayKey != dayKey || cachedStepsKey != stepsKey || cachedDailySteps < 0) {
+            cachedWorkerDayKey = dayKey
+            cachedStepsKey = stepsKey
+            cachedDailySteps = prefs.getInt(stepsKey, 0).coerceAtLeast(0)
+            cachedActiveMinutes = prefs.getInt(workerActiveMinKey(today, workerId), 0).coerceAtLeast(0)
+            cachedLastActiveBucket = prefs.getLong(workerActiveBucketKey(today, workerId), -1L)
+            cachedLastStepAtMs = prefs.getLong(workerLastStepKey(today, workerId), 0L).coerceAtLeast(0L)
+            cachedLastMotionAtMs = prefs.getLong(workerLastMotionKey(today, workerId), 0L).coerceAtLeast(0L)
+            dirtyStepsPending = false
+            recentStepBuckets.clear()
+            recentMotionBuckets.clear()
+        }
+    }
+
+    private fun readLiveSteps(prefs: android.content.SharedPreferences, today: String, workerId: String): Int {
+        ensureCacheLoaded(prefs, today, workerId)
+        return cachedDailySteps
+    }
+
+    private fun pruneRollingBuckets(currentMinuteBucket: Long) {
+        val cutoff = currentMinuteBucket - 9L
+        val stepIter = recentStepBuckets.entries.iterator()
+        while (stepIter.hasNext()) {
+            if (stepIter.next().key < cutoff) stepIter.remove()
+        }
+        val motionIter = recentMotionBuckets.iterator()
+        while (motionIter.hasNext()) {
+            if (motionIter.next() < cutoff) motionIter.remove()
+        }
+    }
+
+    private fun flushToPrefsIfDue(
+        prefs: android.content.SharedPreferences,
+        today: String,
+        workerId: String,
+        nowMs: Long,
+        forceFlush: Boolean = false
+    ) {
+        dirtyStepsPending = true
+        if (forceFlush || (nowMs - lastDiskFlushMs) >= 2500L) {
+            prefs.edit()
+                .putInt(workerStepsKey(today, workerId), cachedDailySteps.coerceAtLeast(0))
+                .putInt(workerActiveMinKey(today, workerId), cachedActiveMinutes.coerceAtLeast(0))
+                .putLong(workerActiveBucketKey(today, workerId), cachedLastActiveBucket)
+                .putLong(workerLastStepKey(today, workerId), cachedLastStepAtMs)
+                .putLong(workerLastMotionKey(today, workerId), cachedLastMotionAtMs)
+                .apply()
+            lastDiskFlushMs = nowMs
+            dirtyStepsPending = false
+        }
+    }
+
+    private fun recordWorkMotion(
+        prefs: android.content.SharedPreferences,
+        today: String,
+        workerId: String,
+        nowMs: Long
+    ) {
+        ensureCacheLoaded(prefs, today, workerId)
+        cachedLastMotionAtMs = nowMs
+        val minuteBucket = nowMs / 60_000L
+        pruneRollingBuckets(minuteBucket)
+        recentMotionBuckets.add(minuteBucket)
+        if (minuteBucket != cachedLastActiveBucket) {
+            cachedLastActiveBucket = minuteBucket
+            cachedActiveMinutes = (cachedActiveMinutes + 1).coerceAtMost(960)
+        }
+        flushToPrefsIfDue(prefs, today, workerId, nowMs, forceFlush = false)
+    }
+
+    private fun recordConfirmedSteps(
+        prefs: android.content.SharedPreferences,
+        today: String,
+        workerId: String,
+        newTotalSteps: Int,
+        deltaSteps: Int,
+        nowMs: Long
+    ) {
+        ensureCacheLoaded(prefs, today, workerId)
+        val safeVal = newTotalSteps.coerceAtLeast(0)
+        cachedDailySteps = safeVal
+        if (deltaSteps > 0) {
+            cachedLastStepAtMs = nowMs
+            val minuteBucket = nowMs / 60_000L
+            pruneRollingBuckets(minuteBucket)
+            recentStepBuckets[minuteBucket] = (recentStepBuckets[minuteBucket] ?: 0) + deltaSteps
+            recordWorkMotion(prefs, today, workerId, nowMs)
+        } else {
+            flushToPrefsIfDue(prefs, today, workerId, nowMs, forceFlush = false)
+        }
+    }
+
+    @Synchronized
+    fun flushPendingDiskWrite(context: Context) {
+        if (!dirtyStepsPending || cachedWorkerDayKey.isEmpty() || cachedDailySteps < 0) return
+        try {
+            val prefs = context.applicationContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+            prefs.edit()
+                .putInt("steps_$cachedWorkerDayKey", cachedDailySteps.coerceAtLeast(0))
+                .putInt("active_min_$cachedWorkerDayKey", cachedActiveMinutes.coerceAtLeast(0))
+                .putLong("active_bucket_$cachedWorkerDayKey", cachedLastActiveBucket)
+                .putLong("last_step_ms_$cachedWorkerDayKey", cachedLastStepAtMs)
+                .putLong("last_motion_ms_$cachedWorkerDayKey", cachedLastMotionAtMs)
+                .apply()
+            lastDiskFlushMs = System.currentTimeMillis()
+            dirtyStepsPending = false
+        } catch (_: Exception) {
+        }
     }
 
     private fun resetCadenceFilter() {
@@ -368,6 +550,9 @@ object WorkerStepTracker : SensorEventListener {
         consecutiveDetectorSteps = 0
         consecutiveRhythmicSteps = 0
         isWalkingConfirmed = false
+        lastWorkMotionSampleMs = 0L
+        motionWindowStartMs = 0L
+        motionImpulseCount = 0
     }
 
     fun hasActivityRecognitionPermission(ctx: Context): Boolean {
@@ -379,17 +564,25 @@ object WorkerStepTracker : SensorEventListener {
     }
 
     @Synchronized
+    fun ensureRegisteredIfTracking(context: Context) {
+        if (trackingEnabled && activeWorkerId.isNotEmpty() && !isRegistered) {
+            start(context)
+        }
+    }
+
+    @Synchronized
     fun setTrackingState(context: Context, enabled: Boolean, workerId: String) {
         val ctx = context.applicationContext
         appContext = ctx
         val cleanId = workerId.trim()
         if (!enabled || cleanId.isEmpty()) {
-            if (trackingEnabled || isRegistered) {
+            if (trackingEnabled || isRegistered || WorkerShiftMonitorService.isRunning) {
                 trackingEnabled = false
                 activeWorkerId = ""
                 rebaselineNeeded = true
                 resetCadenceFilter()
                 stop(ctx)
+                WorkerShiftMonitorService.stop(ctx)
             }
             return
         }
@@ -402,6 +595,9 @@ object WorkerStepTracker : SensorEventListener {
         trackingEnabled = true
         if (!isRegistered) {
             start(ctx)
+        }
+        if (!WorkerShiftMonitorService.isRunning) {
+            WorkerShiftMonitorService.startForWorker(ctx, cleanId)
         }
     }
 
@@ -445,9 +641,15 @@ object WorkerStepTracker : SensorEventListener {
                 hasStepDetectorSensor = ok
                 anyRegistered = anyRegistered || ok
             }
-            // Always register accelerometer as a hybrid fallback in case hardware step sensors are silent or permission was denied
+            // Register accelerometer at battery-friendly UI rate when hardware step sensor exists
+            // (used for stationary craft work detection), or GAME rate when acting as walking fallback
             if (accelerometer != null) {
-                val ok = sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME)
+                val accelDelay = if (hasStepCounterSensor || hasStepDetectorSensor) {
+                    SensorManager.SENSOR_DELAY_UI
+                } else {
+                    SensorManager.SENSOR_DELAY_GAME
+                }
+                val ok = sensorManager.registerListener(this, accelerometer, accelDelay)
                 anyRegistered = anyRegistered || ok
             }
         } catch (_: Exception) {
@@ -457,6 +659,7 @@ object WorkerStepTracker : SensorEventListener {
 
     @Synchronized
     fun stop(context: Context) {
+        flushPendingDiskWrite(context)
         val sensorManager = context.applicationContext.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
         if (isRegistered && sensorManager != null) {
             try {
@@ -476,7 +679,6 @@ object WorkerStepTracker : SensorEventListener {
         val ctx = appContext ?: return
         val prefs = ctx.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
         val today = todayKey()
-        val stepsKey = workerStepsKey(today, workerId)
         val baseKey = workerBaselineKey(today, workerId)
         val now = System.currentTimeMillis()
 
@@ -486,7 +688,7 @@ object WorkerStepTracker : SensorEventListener {
                 if (totalSinceBoot <= 0f) return
                 lastStepCounterEventMs = now
                 lastHardwareStepMs = now
-                val existingDaily = prefs.getInt(stepsKey, 0).coerceAtLeast(0)
+                val existingDaily = readLiveSteps(prefs, today, workerId)
                 val savedBaseline = prefs.getFloat(baseKey, -1f)
                 if (rebaselineNeeded || savedBaseline < 0f || totalSinceBoot < savedBaseline) {
                     val newBaseline = (totalSinceBoot - existingDaily).coerceAtLeast(0f)
@@ -496,7 +698,7 @@ object WorkerStepTracker : SensorEventListener {
                     val computedDaily = (totalSinceBoot - savedBaseline).roundToInt().coerceAtLeast(0)
                     val delta = computedDaily - existingDaily
                     if (delta in 1..2500) {
-                        prefs.edit().putInt(stepsKey, computedDaily).apply()
+                        recordConfirmedSteps(prefs, today, workerId, computedDaily, delta, now)
                     } else if (delta > 2500) {
                         // Guard against multi-hour off-shift jump: rebase to current existingDaily
                         prefs.edit().putFloat(baseKey, (totalSinceBoot - existingDaily).coerceAtLeast(0f)).apply()
@@ -517,15 +719,12 @@ object WorkerStepTracker : SensorEventListener {
                 lastHardwareStepMs = now
                 // Confirm real movement from the 2nd rhythmic hardware step
                 if (consecutiveDetectorSteps >= 2) {
-                    val current = prefs.getInt(stepsKey, 0).coerceAtLeast(0)
+                    val current = readLiveSteps(prefs, today, workerId)
                     val add = if (consecutiveDetectorSteps == 2) 2 else 1
-                    val updated = current + add
-                    prefs.edit().putInt(stepsKey, updated).apply()
+                    recordConfirmedSteps(prefs, today, workerId, current + add, add, now)
                 }
             }
             Sensor.TYPE_ACCELEROMETER -> {
-                // Only use accelerometer if neither hardware step sensor has fired in the last 4 seconds
-                if ((now - lastHardwareStepMs) < 4000L) return
                 val x = event.values[0]
                 val y = event.values[1]
                 val z = event.values[2]
@@ -533,6 +732,31 @@ object WorkerStepTracker : SensorEventListener {
                 // Low-pass filter to isolate gravity component
                 gravityEstimate = 0.88f * gravityEstimate + 0.12f * mag
                 val dynamicAccel = mag - gravityEstimate
+
+                // 1) Stationary craft work motion detection (runs even if hardware step sensor is active)
+                // Captures sustained manual work (painting, gypsum, electrical, plumbing) without adding fake steps
+                if ((now - lastWorkMotionSampleMs) >= 200L) {
+                    lastWorkMotionSampleMs = now
+                    if (abs(dynamicAccel) >= 0.48f) {
+                        if (motionWindowStartMs == 0L || (now - motionWindowStartMs) > 4000L) {
+                            motionWindowStartMs = now
+                            motionImpulseCount = 1
+                        } else {
+                            motionImpulseCount++
+                            if (motionImpulseCount >= 6) {
+                                recordWorkMotion(prefs, today, workerId, now)
+                                motionWindowStartMs = now
+                                motionImpulseCount = 0
+                            }
+                        }
+                    } else if (motionWindowStartMs > 0L && (now - motionWindowStartMs) > 4500L) {
+                        motionWindowStartMs = 0L
+                        motionImpulseCount = 0
+                    }
+                }
+
+                // 2) Walking-step fallback: ONLY runs if neither hardware step sensor has fired in the last 4 seconds
+                if ((now - lastHardwareStepMs) < 4000L) return
 
                 // Reset walking cadence if paused for > 2.0 seconds
                 if (lastAccelStepTimestampMs > 0L && (now - lastAccelStepTimestampMs) > 2000L) {
@@ -566,11 +790,11 @@ object WorkerStepTracker : SensorEventListener {
                         // Confirm real walking after 3 consecutive rhythmic steps (rejects isolated hand/table bumps)
                         if (!isWalkingConfirmed && consecutiveRhythmicSteps >= 3) {
                             isWalkingConfirmed = true
-                            val current = prefs.getInt(stepsKey, 0).coerceAtLeast(0)
-                            prefs.edit().putInt(stepsKey, current + 3).apply()
+                            val current = readLiveSteps(prefs, today, workerId)
+                            recordConfirmedSteps(prefs, today, workerId, current + 3, 3, now)
                         } else if (isWalkingConfirmed) {
-                            val current = prefs.getInt(stepsKey, 0).coerceAtLeast(0)
-                            prefs.edit().putInt(stepsKey, current + 1).apply()
+                            val current = readLiveSteps(prefs, today, workerId)
+                            recordConfirmedSteps(prefs, today, workerId, current + 1, 1, now)
                         }
                     } else if (sincePeak > 850L) {
                         awaitingTrough = false
@@ -582,18 +806,61 @@ object WorkerStepTracker : SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
+    fun getLiveNotificationSummary(context: Context, workerIdParam: String): String {
+        val prefs = context.applicationContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+        val today = todayKey()
+        val targetId = workerIdParam.trim().ifEmpty { activeWorkerId }
+        if (targetId.isEmpty()) return "جاري قياس الخطوات والنشاط بالموقع"
+        val dayKey = workerDayId(today, targetId)
+        val isSameCache = cachedWorkerDayKey == dayKey && cachedDailySteps >= 0
+        val steps = if (isSameCache) cachedDailySteps else prefs.getInt(workerStepsKey(today, targetId), 0).coerceAtLeast(0)
+        val activeMin = if (isSameCache) cachedActiveMinutes else prefs.getInt(workerActiveMinKey(today, targetId), 0).coerceAtLeast(0)
+        val lastMotion = if (isSameCache) cachedLastMotionAtMs else prefs.getLong(workerLastMotionKey(today, targetId), 0L).coerceAtLeast(0L)
+        val now = System.currentTimeMillis()
+        val statusAr = when {
+            lastMotion <= 0L -> "بانتظار الحركة"
+            (now - lastMotion) <= IDLE_THRESHOLD_MS -> "يعمل بنشاط"
+            else -> "متوقف منذ ${((now - lastMotion) / 60_000L).coerceAtLeast(1L)}د"
+        }
+        return "$steps خطوة • $activeMin د نشطة • $statusAr"
+    }
+
+    @Synchronized
     fun getStepMetricsJson(context: Context, workerIdParam: String = ""): String {
         val prefs = context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
         val today = todayKey()
         val targetWorkerId = workerIdParam.trim().ifEmpty { activeWorkerId }
+        val now = System.currentTimeMillis()
+        val currentBucket = now / 60_000L
+        pruneRollingBuckets(currentBucket)
+
+        val dayKey = if (targetWorkerId.isNotEmpty()) workerDayId(today, targetWorkerId) else ""
+        val useCache = targetWorkerId.isNotEmpty() && cachedWorkerDayKey == dayKey && cachedDailySteps >= 0
+
         val steps = if (targetWorkerId.isNotEmpty()) {
-            prefs.getInt(workerStepsKey(today, targetWorkerId), 0).coerceAtLeast(0)
-        } else {
-            0
+            if (useCache) cachedDailySteps else prefs.getInt(workerStepsKey(today, targetWorkerId), 0).coerceAtLeast(0)
+        } else 0
+        val activeMinutes = if (targetWorkerId.isNotEmpty()) {
+            if (useCache) cachedActiveMinutes else prefs.getInt(workerActiveMinKey(today, targetWorkerId), 0).coerceAtLeast(0)
+        } else 0
+        val lastStepAt = if (targetWorkerId.isNotEmpty()) {
+            if (useCache) cachedLastStepAtMs else prefs.getLong(workerLastStepKey(today, targetWorkerId), 0L).coerceAtLeast(0L)
+        } else 0L
+        val lastMotionAt = if (targetWorkerId.isNotEmpty()) {
+            if (useCache) cachedLastMotionAtMs else prefs.getLong(workerLastMotionKey(today, targetWorkerId), 0L).coerceAtLeast(0L)
+        } else 0L
+
+        val recentSteps10m = if (useCache) recentStepBuckets.values.sum() else 0
+        val recentMotionMin10m = if (useCache) recentMotionBuckets.size else 0
+        val idleMinutes = if (lastMotionAt > 0L) ((now - lastMotionAt) / 60_000L).toInt().coerceAtLeast(0) else 0
+        val motionState = when {
+            lastMotionAt <= 0L -> "waiting"
+            (now - lastMotionAt) <= IDLE_THRESHOLD_MS -> "active"
+            else -> "idle"
         }
+
         val distanceMeters = (steps * 0.75).roundToInt()
         val calories = (steps * 0.045).roundToInt()
-        // Effort target for a full construction shift is ~6000 active site steps
         val effortScore = min(100, ((steps.toDouble() / 6000.0) * 100.0).roundToInt())
         val effortStars = when {
             steps >= 6000 -> 6
@@ -606,22 +873,172 @@ object WorkerStepTracker : SensorEventListener {
         }
         val activeNow = isRegistered && trackingEnabled && activeWorkerId.isNotEmpty()
         val permGranted = hasActivityRecognitionPermission(context)
-        return """{"steps":$steps,"distanceMeters":$distanceMeters,"calories":$calories,"effortScore":$effortScore,"effortStars":$effortStars,"sensorActive":$activeNow,"permissionGranted":$permGranted,"date":"$today"}"""
+        val fgsActive = WorkerShiftMonitorService.isRunning
+        return """{"steps":$steps,"distanceMeters":$distanceMeters,"calories":$calories,"effortScore":$effortScore,"effortStars":$effortStars,"activeMinutes":$activeMinutes,"lastStepAt":$lastStepAt,"lastMotionAt":$lastMotionAt,"recentSteps10m":$recentSteps10m,"recentMotionMin10m":$recentMotionMin10m,"idleMinutes":$idleMinutes,"motionState":"$motionState","foregroundServiceActive":$fgsActive,"sensorActive":$activeNow,"permissionGranted":$permGranted,"date":"$today"}"""
     }
 
+    @Synchronized
     fun resetTodaySteps(context: Context, workerIdParam: String = ""): String {
         val prefs = context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
         val today = todayKey()
         val targetWorkerId = workerIdParam.trim().ifEmpty { activeWorkerId }
         rebaselineNeeded = true
         resetCadenceFilter()
+        recentStepBuckets.clear()
+        recentMotionBuckets.clear()
         if (targetWorkerId.isNotEmpty()) {
+            val dayKey = workerDayId(today, targetWorkerId)
+            val k = workerStepsKey(today, targetWorkerId)
+            cachedWorkerDayKey = dayKey
+            cachedStepsKey = k
+            cachedDailySteps = 0
+            cachedActiveMinutes = 0
+            cachedLastActiveBucket = -1L
+            cachedLastStepAtMs = 0L
+            cachedLastMotionAtMs = 0L
+            dirtyStepsPending = false
             prefs.edit()
-                .putInt(workerStepsKey(today, targetWorkerId), 0)
+                .putInt(k, 0)
                 .putFloat(workerBaselineKey(today, targetWorkerId), -1f)
+                .putInt(workerActiveMinKey(today, targetWorkerId), 0)
+                .putLong(workerActiveBucketKey(today, targetWorkerId), -1L)
+                .putLong(workerLastStepKey(today, targetWorkerId), 0L)
+                .putLong(workerLastMotionKey(today, targetWorkerId), 0L)
                 .apply()
         }
         return getStepMetricsJson(context, targetWorkerId)
+    }
+}
+
+object AlOstaLocationManager {
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+    @Volatile
+    private var continuousShiftTracking = false
+    @Volatile
+    private var isListening = false
+    @Volatile
+    private var lastFreshLocation: android.location.Location? = null
+    private var activeListener: android.location.LocationListener? = null
+    private var singleShotStopRunnable: Runnable? = null
+
+    private fun hasLocationPermission(ctx: Context): Boolean {
+        val fine = ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarse = ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        return fine || coarse
+    }
+
+    @SuppressLint("MissingPermission")
+    @Synchronized
+    fun setShiftTracking(context: Context, enabled: Boolean) {
+        continuousShiftTracking = enabled
+        if (enabled) {
+            startListening(context.applicationContext, minTimeMs = 15000L, minDistM = 8f)
+        } else {
+            stopTracking(context.applicationContext)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    @Synchronized
+    fun requestOneShotFreshFix(context: Context) {
+        val appCtx = context.applicationContext
+        if (!hasLocationPermission(appCtx)) return
+        if (isListening) return
+        startListening(appCtx, minTimeMs = 2000L, minDistM = 1f)
+        singleShotStopRunnable?.let { mainHandler.removeCallbacks(it) }
+        val stopTask = Runnable {
+            if (!continuousShiftTracking) {
+                stopTracking(appCtx)
+            }
+        }
+        singleShotStopRunnable = stopTask
+        mainHandler.postDelayed(stopTask, 12000L)
+    }
+
+    @SuppressLint("MissingPermission")
+    @Synchronized
+    private fun startListening(appCtx: Context, minTimeMs: Long, minDistM: Float) {
+        if (!hasLocationPermission(appCtx) || isListening) return
+        val lm = appCtx.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager ?: return
+        val listener = android.location.LocationListener { loc ->
+            lastFreshLocation = loc
+        }
+        activeListener = listener
+        mainHandler.post {
+            try {
+                if (lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)) {
+                    lm.requestLocationUpdates(android.location.LocationManager.GPS_PROVIDER, minTimeMs, minDistM, listener, Looper.getMainLooper())
+                }
+                if (lm.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)) {
+                    lm.requestLocationUpdates(android.location.LocationManager.NETWORK_PROVIDER, minTimeMs, minDistM, listener, Looper.getMainLooper())
+                }
+                isListening = true
+            } catch (_: Exception) {
+                isListening = false
+            }
+        }
+    }
+
+    @Synchronized
+    fun pauseIfIdle(context: Context) {
+        if (!continuousShiftTracking) {
+            stopTracking(context)
+        }
+    }
+
+    @Synchronized
+    fun stopTracking(context: Context) {
+        singleShotStopRunnable?.let { mainHandler.removeCallbacks(it) }
+        singleShotStopRunnable = null
+        val listener = activeListener ?: return
+        val lm = context.applicationContext.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
+        mainHandler.post {
+            try {
+                lm?.removeUpdates(listener)
+            } catch (_: Exception) {
+            }
+        }
+        activeListener = null
+        isListening = false
+    }
+
+    @SuppressLint("MissingPermission")
+    fun getBestLocationJson(context: Context): String {
+        val appCtx = context.applicationContext
+        if (!hasLocationPermission(appCtx)) return ""
+        return try {
+            val lm = appCtx.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager ?: return ""
+            var bestLocation: android.location.Location? = lastFreshLocation
+            val providers = listOf(
+                android.location.LocationManager.GPS_PROVIDER,
+                android.location.LocationManager.NETWORK_PROVIDER,
+                android.location.LocationManager.PASSIVE_PROVIDER
+            )
+            for (provider in providers) {
+                try {
+                    if (lm.isProviderEnabled(provider)) {
+                        val loc = lm.getLastKnownLocation(provider)
+                        if (loc != null) {
+                            if (bestLocation == null || loc.time > bestLocation.time || (loc.time >= bestLocation.time - 15000L && loc.accuracy < bestLocation.accuracy)) {
+                                bestLocation = loc
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            val now = System.currentTimeMillis()
+            if (bestLocation == null || (now - bestLocation.time) > 30000L) {
+                requestOneShotFreshFix(appCtx)
+            }
+            if (bestLocation != null) {
+                """{"lat":${bestLocation.latitude},"lng":${bestLocation.longitude},"accuracy":${bestLocation.accuracy},"timestamp":${bestLocation.time}}"""
+            } else {
+                ""
+            }
+        } catch (_: Exception) {
+            ""
+        }
     }
 }
 
@@ -1606,48 +2023,14 @@ class AndroidAppBridge(
     @SuppressLint("MissingPermission")
     @JavascriptInterface
     fun getNativeLocation(): String {
-        return try {
-            val hasFine = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-            val hasCoarse = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!hasFine && !hasCoarse) return ""
+        return AlOstaLocationManager.getBestLocationJson(context)
+    }
 
-            val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
-                ?: return ""
-
-            val providers = listOf(
-                android.location.LocationManager.GPS_PROVIDER,
-                android.location.LocationManager.NETWORK_PROVIDER,
-                android.location.LocationManager.PASSIVE_PROVIDER
-            )
-
-            var bestLocation: android.location.Location? = null
-            for (provider in providers) {
-                try {
-                    if (locationManager.isProviderEnabled(provider)) {
-                        val loc = locationManager.getLastKnownLocation(provider)
-                        if (loc != null) {
-                            if (bestLocation == null || loc.time > bestLocation.time || loc.accuracy < bestLocation.accuracy) {
-                                bestLocation = loc
-                            }
-                        }
-                    }
-                } catch (_: Exception) {
-                }
-            }
-
-            if (bestLocation != null) {
-                """{"lat":${bestLocation.latitude},"lng":${bestLocation.longitude},"accuracy":${bestLocation.accuracy},"timestamp":${bestLocation.time}}"""
-            } else {
-                ""
-            }
-        } catch (e: Exception) {
-            ""
+    @JavascriptInterface
+    fun setGpsTrackingActive(enabled: Boolean) {
+        try {
+            AlOstaLocationManager.setShiftTracking(context, enabled)
+        } catch (_: Exception) {
         }
     }
 
@@ -1872,39 +2255,10 @@ fun AlOstaAppScreen(
         }
     }
 
-    // Active hardware GPS listener so getLastKnownLocation and WebView geolocation are always fresh
-    DisposableEffect(context, hasLocationPermission) {
-        val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
-        val locListener = android.location.LocationListener { _ -> }
-        if (hasLocationPermission && locationManager != null) {
-            try {
-                if (locationManager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)) {
-                    locationManager.requestLocationUpdates(
-                        android.location.LocationManager.GPS_PROVIDER,
-                        4000L,
-                        2f,
-                        locListener,
-                        Looper.getMainLooper()
-                    )
-                }
-                if (locationManager.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)) {
-                    locationManager.requestLocationUpdates(
-                        android.location.LocationManager.NETWORK_PROVIDER,
-                        4000L,
-                        2f,
-                        locListener,
-                        Looper.getMainLooper()
-                    )
-                }
-            } catch (_: SecurityException) {
-            } catch (_: Exception) {
-            }
-        }
+    // Battery-friendly GPS: stopped when screen disposes; active ONLY on-demand or during a worker's active shift
+    DisposableEffect(context) {
         onDispose {
-            try {
-                locationManager?.removeUpdates(locListener)
-            } catch (_: Exception) {
-            }
+            AlOstaLocationManager.stopTracking(context)
         }
     }
 
@@ -2034,11 +2388,10 @@ fun AlOstaAppScreen(
                                 setSupportMultipleWindows(true)
                                 loadsImagesAutomatically = true
                                 mediaPlaybackRequiresUserGesture = false
-                                cacheMode = WebSettings.LOAD_NO_CACHE
-                                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                cacheMode = WebSettings.LOAD_DEFAULT
+                                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                                 textZoom = 100
                             }
-                            clearCache(true)
 
                             addJavascriptInterface(
                                 AndroidAppBridge(

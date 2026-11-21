@@ -5,20 +5,38 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-touch-fullscreen" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="الأسطة">
     <meta name="theme-color" content="#4f46e5">
     <meta name="format-detection" content="telephone=no">
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png">
     <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png">
+    <link rel="apple-touch-icon" sizes="167x167" href="./apple-touch-icon.png">
+    <link rel="apple-touch-icon" sizes="152x152" href="./apple-touch-icon.png">
+    <link rel="apple-touch-icon" sizes="120x120" href="./apple-touch-icon.png">
     <link rel="icon" type="image/png" sizes="192x192" href="./app-icon-192.png">
     <link rel="manifest" href="./manifest.json">
     <title>نظام أستاذ وعد | الأسطة</title>
 
     <script>
         tailwind = { config: { darkMode: 'class' } };
-        window.IS_IOS_DEVICE = /iPad|iPhone|iPod/i.test(navigator.userAgent || '') || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-        window.IS_IOS_STANDALONE = Boolean(window.navigator.standalone === true || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches));
+        (function () {
+            const ua = navigator.userAgent || '';
+            const isIos = /iPad|iPhone|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            const isSafari = isIos && /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo|FBAN|FBAV|Instagram|WhatsApp|Telegram|Line|Snapchat|Twitter|GSA/i.test(ua);
+            window.IS_IOS_DEVICE = isIos;
+            window.IS_IOS_SAFARI = isSafari;
+            window.IS_IOS_INAPP = isIos && !isSafari;
+            window.IS_IOS_STANDALONE = Boolean(window.navigator.standalone === true || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches));
+            window.__deferredInstallPrompt = null;
+            window.addEventListener('beforeinstallprompt', function (e) {
+                e.preventDefault();
+                window.__deferredInstallPrompt = e;
+                window.dispatchEvent(new CustomEvent('alosta-pwa-prompt-ready'));
+            });
+        })();
         if (window.location && /^https?:$/i.test(window.location.protocol) && 'serviceWorker' in navigator) {
             window.addEventListener('load', function () {
                 navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(function () {});
@@ -476,7 +494,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.14";
+        const APP_VERSION = "1.0.16";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -519,6 +537,7 @@
 
             const STORAGE_KEY = 'al_osta_smart_db_v1';
             let store = {};
+            let pendingCloudOps = [];
             try {
                 const nativeJson = (window.AndroidApp && window.AndroidApp.loadLocalDb) ? window.AndroidApp.loadLocalDb() : null;
                 const localJson = localStorage.getItem(STORAGE_KEY);
@@ -529,15 +548,45 @@
                 store = {};
             }
 
+            // Async hydrate from IndexedDB vault (>5MB capacity) and recover any pending offline writes
+            if (window.AlOstaIndexedVault) {
+                window.AlOstaIndexedVault.loadSnapshotAsync().then((idbStore) => {
+                    if (idbStore && typeof idbStore === 'object' && Object.keys(idbStore).length > 0) {
+                        let hydrated = false;
+                        Object.keys(idbStore).forEach(col => {
+                            if (!store[col] || Object.keys(store[col]).length < Object.keys(idbStore[col] || {}).length) {
+                                store[col] = { ...(idbStore[col] || {}), ...(store[col] || {}) };
+                                hydrated = true;
+                            }
+                        });
+                        if (hydrated) {
+                            Object.keys(colListeners).forEach(c => notifyCollection(c));
+                        }
+                    }
+                }).catch(() => {});
+                window.AlOstaIndexedVault.loadPendingOpsAsync().then((ops) => {
+                    if (Array.isArray(ops) && ops.length > 0) {
+                        pendingCloudOps = ops;
+                        flushPendingCloudOps();
+                    }
+                }).catch(() => {});
+            }
+
             let persistTimer = null;
             const flushPersistStore = () => {
                 if (persistTimer) {
                     clearTimeout(persistTimer);
                     persistTimer = null;
                 }
+                if (window.AlOstaIndexedVault) {
+                    window.AlOstaIndexedVault.saveSnapshotAsync(store).catch(() => {});
+                }
                 try {
                     const serialized = JSON.stringify(store);
-                    localStorage.setItem(STORAGE_KEY, serialized);
+                    // Only mirror to localStorage if well under the 5MB browser quota
+                    if (serialized.length < 3500000) {
+                        localStorage.setItem(STORAGE_KEY, serialized);
+                    }
                     if (window.AndroidApp && window.AndroidApp.saveLocalDb) {
                         window.AndroidApp.saveLocalDb(serialized);
                     }
@@ -552,6 +601,64 @@
                 if (persistTimer) clearTimeout(persistTimer);
                 persistTimer = setTimeout(flushPersistStore, 350);
             };
+
+            const queuePendingOp = (op) => {
+                pendingCloudOps.push({ ...op, queuedAt: Date.now() });
+                if (pendingCloudOps.length > 300) pendingCloudOps = pendingCloudOps.slice(-300);
+                if (window.AlOstaIndexedVault) {
+                    window.AlOstaIndexedVault.savePendingOpsAsync(pendingCloudOps).catch(() => {});
+                }
+            };
+
+            let flushingPending = false;
+            const flushPendingCloudOps = async () => {
+                if (flushingPending || !rawDb || pendingCloudOps.length === 0) return;
+                if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+                flushingPending = true;
+                if (window.AlOstaIndexedVault) {
+                    window.AlOstaIndexedVault.updateSyncStatus({ status: 'syncing' });
+                }
+                try {
+                    cloudAvailable = true;
+                    const remaining = [];
+                    for (const op of pendingCloudOps) {
+                        try {
+                            const ref = rawDb.collection(op.colName).doc(op.id);
+                            if (op.type === 'set') {
+                                if (op.merge) await ref.set(toRawPatch(op.data), { merge: true });
+                                else await ref.set(toRawPatch(op.data));
+                            } else if (op.type === 'update') {
+                                await ref.update(toRawPatch(op.data));
+                            } else if (op.type === 'delete') {
+                                await ref.delete();
+                            }
+                        } catch (err) {
+                            remaining.push(op);
+                        }
+                    }
+                    pendingCloudOps = remaining;
+                    if (window.AlOstaIndexedVault) {
+                        await window.AlOstaIndexedVault.savePendingOpsAsync(pendingCloudOps);
+                        if (pendingCloudOps.length === 0) {
+                            window.AlOstaIndexedVault.updateSyncStatus({ status: 'synced', pendingCount: 0 });
+                        }
+                    }
+                } finally {
+                    flushingPending = false;
+                }
+            };
+
+            if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+                window.addEventListener('online', () => {
+                    cloudAvailable = true;
+                    flushPendingCloudOps();
+                });
+                window.addEventListener('offline', () => {
+                    if (window.AlOstaIndexedVault) {
+                        window.AlOstaIndexedVault.updateSyncStatus({ status: 'offline' });
+                    }
+                });
+            }
 
             const colListeners = {};
             const notifyCollection = (colName) => {
@@ -749,7 +856,7 @@
                 };
             };
 
-            const syncQuerySnapshotToLocal = (colName, filters, snap, forceAuthoritative = false) => {
+            const syncQuerySnapshotToLocal = (colName, filters, snap, forceAuthoritative = false, limitCount = 0) => {
                 if (!snap || !Array.isArray(snap.docs)) return;
                 const colObj = ensureCol(colName);
                 const fromCache = Boolean(snap.metadata && snap.metadata.fromCache) && !forceAuthoritative;
@@ -768,7 +875,8 @@
                     colObj[d.id] = d.data();
                 });
 
-                if (!fromCache) {
+                // CRITICAL: Only reconcile missing local docs when query is NOT truncated by .limit(n)
+                if (!fromCache && (!limitCount || limitCount <= 0)) {
                     if (!filters || filters.length === 0) {
                         Object.keys(colObj).forEach(k => {
                             if (!liveIds.has(k)) delete colObj[k];
@@ -803,7 +911,7 @@
                                 const timeoutMs = (options && options.timeoutMs) || (forceServer ? 7500 : (!localFirst.empty ? 2200 : 3500));
                                 const snap = await withCloudTimeout(rawPromise, timeoutMs);
                                 if (snap && Array.isArray(snap.docs)) {
-                                    syncQuerySnapshotToLocal(colName, filters, snap, forceServer && limitCount === 0);
+                                    syncQuerySnapshotToLocal(colName, filters, snap, forceServer, limitCount);
                                     return buildLocalQuerySnapshot(colName, filters, limitCount);
                                 }
                             } catch (err) {
@@ -829,7 +937,7 @@
                                 rawUnsub = q.onSnapshot(
                                     (snap) => {
                                         if (snap && snap.docs) {
-                                            syncQuerySnapshotToLocal(colName, filters, snap, false);
+                                            syncQuerySnapshotToLocal(colName, filters, snap, false, limitCount);
                                             emitLocal();
                                         }
                                     },
@@ -864,16 +972,16 @@
                             persistStore();
                             notifyCollection(colName);
                             if (rawDb && cloudAvailable) {
-                                rawDb.collection(colName).add(toRawPatch(data)).then(ref => {
-                                    if (ref && ref.id && ref.id !== id) {
-                                        colObj[ref.id] = colObj[id];
-                                        delete colObj[id];
-                                        persistStore();
-                                        notifyCollection(colName);
+                                rawDb.collection(colName).doc(id).set(toRawPatch(data)).then(() => {
+                                    if (window.AlOstaIndexedVault && pendingCloudOps.length === 0) {
+                                        window.AlOstaIndexedVault.updateSyncStatus({ status: 'synced' });
                                     }
                                 }).catch(() => {
-                                    cloudAvailable = false;
+                                    // Never permanently disable cloudAvailable; queue for auto-retry when online
+                                    queuePendingOp({ type: 'set', colName, id, data, merge: false });
                                 });
+                            } else {
+                                queuePendingOp({ type: 'set', colName, id, data, merge: false });
                             }
                             return { id };
                         }
@@ -912,11 +1020,14 @@
                             persistStore(true);
                             touchedCols.forEach(c => notifyCollection(c));
 
-                            if (rawDb && cloudAvailable) {
-                                try {
-                                    if (typeof rawDb.batch === 'function') {
+                            if (rawDb && cloudAvailable && typeof rawDb.batch === 'function') {
+                                // Auto-chunk every 450 operations to stay safely under Firestore's 500-op hard limit
+                                const CHUNK_SIZE = 450;
+                                for (let start = 0; start < ops.length; start += CHUNK_SIZE) {
+                                    const chunk = ops.slice(start, start + CHUNK_SIZE);
+                                    try {
                                         const fbBatch = rawDb.batch();
-                                        for (const op of ops) {
+                                        for (const op of chunk) {
                                             const colName = op.docRef && op.docRef._colName;
                                             const id = op.docRef && op.docRef.id;
                                             if (!colName || !id) continue;
@@ -929,8 +1040,20 @@
                                             } else if (op.type === 'delete') fbBatch.delete(rawRef);
                                         }
                                         await fbBatch.commit();
+                                    } catch (e) {
+                                        chunk.forEach(op => {
+                                            if (op.docRef && op.docRef._colName && op.docRef.id) {
+                                                queuePendingOp({
+                                                    type: op.type,
+                                                    colName: op.docRef._colName,
+                                                    id: op.docRef.id,
+                                                    data: op.data,
+                                                    merge: Boolean(op.setOpts && op.setOpts.merge)
+                                                });
+                                            }
+                                        });
                                     }
-                                } catch (e) {}
+                                }
                             }
                         }
                     };
@@ -1887,8 +2010,17 @@
             } catch (e) { }
         };
 
-        const getEffortInfo = (rawSteps, lang = 'ar') => {
+        const getEffortInfo = (rawSteps, lang = 'ar', specialty = '', activeMinutes = 0) => {
+            if (window.AlOstaActivityEngine && typeof window.AlOstaActivityEngine.computeEffortMetrics === 'function') {
+                return window.AlOstaActivityEngine.computeEffortMetrics({
+                    steps: rawSteps,
+                    activeMinutes,
+                    specialty,
+                    lang
+                });
+            }
             const steps = Math.max(0, parseInt(rawSteps) || 0);
+            const activeMin = Math.max(0, parseInt(activeMinutes) || 0);
             const distanceMeters = Math.round(steps * 0.75);
             const calories = Math.round(steps * 0.045);
             const effortScore = Math.min(100, Math.round((steps / 6000) * 100));
@@ -1907,14 +2039,50 @@
             } else if (steps >= 1500) {
                 label = lang === 'ar' ? 'مجهود متوسط' : 'Moderate Effort';
                 badgeClass = 'bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400';
-            } else if (steps > 0) {
+            } else if (steps > 0 || activeMin > 0) {
                 label = lang === 'ar' ? 'حركة خفيفة' : 'Light Activity';
                 badgeClass = 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300';
             } else {
                 label = lang === 'ar' ? 'بانتظار الحركة' : 'Idle';
                 badgeClass = 'bg-slate-100 dark:bg-slate-800 text-slate-400';
             }
-            return { steps, distanceMeters, calories, effortScore, effortStars, label, badgeClass };
+            return { steps, activeMinutes: activeMin, distanceMeters, calories, effortScore, effortStars, stepTarget: 6000, activeMinTarget: 240, tradeType: 'mobile', label, badgeClass };
+        };
+
+        const getVerifiedWorkerActiveMinutes = (w, attRec, targetDate = todayStr()) => {
+            if (attRec && attRec.status === 'absent') return 0;
+            const recMin = attRec && attRec.stepEngineV2 === true ? Math.max(0, parseInt(attRec.activeMinutes) || 0) : 0;
+            if (targetDate !== todayStr()) return recMin;
+            if (!attRec || attRec.status === 'absent') return 0;
+            const workerMin = (w && w.todayStepEngineV2 === true && w.todayEffortDate === todayStr())
+                ? Math.max(0, parseInt(w.todayActiveMinutes) || 0)
+                : 0;
+            return Math.max(recMin, workerMin);
+        };
+
+        const getWorkerLiveStatus = (w, attRec, nowMs = Date.now(), lang = 'ar') => {
+            if (window.AlOstaActivityEngine && typeof window.AlOstaActivityEngine.classifyWorkerLiveStatus === 'function') {
+                return window.AlOstaActivityEngine.classifyWorkerLiveStatus({
+                    worker: w,
+                    todayRec: attRec,
+                    nowMs,
+                    todayDate: todayStr(),
+                    lang
+                });
+            }
+            const isOnShift = Boolean(attRec && attRec.status !== 'absent' && attRec.timeIn && !attRec.timeOut);
+            return {
+                code: isOnShift ? 'active' : 'off_shift',
+                dot: isOnShift ? '🟢' : '⏸',
+                shortLabel: isOnShift ? (lang === 'ar' ? 'نشط' : 'Active') : (lang === 'ar' ? 'خارج المناوبة' : 'Off Shift'),
+                title: isOnShift ? (lang === 'ar' ? '🟢 نشط في الموقع' : '🟢 Active on site') : (lang === 'ar' ? '⏸ متوقف' : '⏸ Paused'),
+                detail: '',
+                idleMinutes: 0,
+                offlineMinutes: 0,
+                recentSteps10m: 0,
+                pillClass: 'bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-200 dark:border-slate-700',
+                textClass: 'text-slate-400'
+            };
         };
 
         const setNativeStepTracking = (enabled, workerId = '') => {
@@ -1923,6 +2091,12 @@
                     window.AndroidApp.setStepTrackingState(Boolean(enabled), String(workerId || ''));
                 }
             } catch (e) { }
+        };
+
+        const EMPTY_NATIVE_STEP_METRICS = {
+            steps: 0, distanceMeters: 0, calories: 0, effortScore: 0, effortStars: 0,
+            activeMinutes: 0, lastStepAt: 0, lastMotionAt: 0, recentSteps10m: 0, recentMotionMin10m: 0,
+            idleMinutes: 0, motionState: 'waiting', foregroundServiceActive: false, sensorActive: false
         };
 
         const readNativeStepMetrics = (workerId = '') => {
@@ -1934,12 +2108,12 @@
                     if (raw) {
                         const parsed = JSON.parse(raw);
                         if (parsed && typeof parsed.steps === 'number') {
-                            return parsed;
+                            return { ...EMPTY_NATIVE_STEP_METRICS, ...parsed };
                         }
                     }
                 }
             } catch (e) { }
-            return { steps: 0, distanceMeters: 0, calories: 0, effortScore: 0, effortStars: 0, sensorActive: false };
+            return { ...EMPTY_NATIVE_STEP_METRICS };
         };
 
         const resetNativeStepMetrics = (workerId = '') => {
@@ -1951,12 +2125,12 @@
                     if (raw) {
                         const parsed = JSON.parse(raw);
                         if (parsed && typeof parsed.steps === 'number') {
-                            return parsed;
+                            return { ...EMPTY_NATIVE_STEP_METRICS, ...parsed };
                         }
                     }
                 }
             } catch (e) { }
-            return { steps: 0, distanceMeters: 0, calories: 0, effortScore: 0, effortStars: 0, sensorActive: false };
+            return { ...EMPTY_NATIVE_STEP_METRICS };
         };
 
         const getVerifiedRecordSteps = (rec) => {
@@ -4538,6 +4712,14 @@
             const [expWorkerId, setExpWorkerId] = useState('');
             const [expFundingMode, setExpFundingMode] = useState('cash'); // 'cash' | 'personal' | 'credit' | 'worker'
             const [attProjectId, setAttProjectId] = useState('');
+            const [activityNowMs, setActivityNowMs] = useState(() => Date.now());
+
+            useEffect(() => {
+                if (view !== 'workers' && view !== 'attendance') return;
+                setActivityNowMs(Date.now());
+                const ticker = setInterval(() => setActivityNowMs(Date.now()), 30000);
+                return () => clearInterval(ticker);
+            }, [view]);
             const [settleExpenseTarget, setSettleExpenseTarget] = useState(null);
             const [settleLiquidityInput, setSettleLiquidityInput] = useState('');
             const [settleLiquidityNote, setSettleLiquidityNote] = useState('');
@@ -4776,6 +4958,18 @@
                 }
             };
 
+            const [syncStatusInfo, setSyncStatusInfo] = useState(() =>
+                window.AlOstaIndexedVault ? window.AlOstaIndexedVault.getSyncStatus() : { status: 'synced', pendingCount: 0 }
+            );
+
+            useEffect(() => {
+                const onSync = (ev) => {
+                    if (ev && ev.detail) setSyncStatusInfo(ev.detail);
+                };
+                window.addEventListener('alosta-sync-state', onSync);
+                return () => window.removeEventListener('alosta-sync-state', onSync);
+            }, []);
+
             useEffect(() => {
                 if (!db) return;
                 const syncTimer = setTimeout(() => setIsInitialSyncing(false), 650);
@@ -4786,10 +4980,11 @@
                         if (list.length > 0) setIsInitialSyncing(false);
                     }),
                     db.collection('workers').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, workers: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('expenses').where('adminId', '==', adminId).limit(dbQueryLimit).onSnapshot(s => setData(p => ({ ...p, expenses: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('payments').where('adminId', '==', adminId).limit(dbQueryLimit).onSnapshot(s => setData(p => ({ ...p, payments: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('advances').where('adminId', '==', adminId).limit(dbQueryLimit).onSnapshot(s => setData(p => ({ ...p, advances: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('attendance').where('adminId', '==', adminId).limit(dbQueryLimit * 2).onSnapshot(s => {
+                    // Financial ledger collections stay un-truncated to guarantee 100% exact balances & net profit (indexed in O(1) & paginated in UI)
+                    db.collection('expenses').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, expenses: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('payments').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, payments: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('advances').where('adminId', '==', adminId).onSnapshot(s => setData(p => ({ ...p, advances: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('attendance').where('adminId', '==', adminId).onSnapshot(s => {
                         const raw = s.docs.map(x => ({ id: x.id, ...x.data() }));
                         setData(p => ({ ...p, attendance: dedupeAttendanceByWorkerDay(raw, true) }));
                     }),
@@ -4826,7 +5021,7 @@
                     clearTimeout(syncTimer);
                     unsubs.forEach(u => u && u());
                 };
-            }, [adminId, dbQueryLimit]);
+            }, [adminId]);
 
             // Optimization 1 & 2: Lazy-load Labor Market (only available workers) & Store Products only when their tab/modal is opened
             useEffect(() => {
@@ -5918,6 +6113,11 @@
                         todayCalories: 0,
                         todayEffortScore: 0,
                         todayEffortStars: 0,
+                        todayActiveMinutes: 0,
+                        todayRecentSteps10m: 0,
+                        lastStepAt: 0,
+                        lastMotionAt: 0,
+                        motionState: 'waiting',
                         todayEffortDate: todayStr(),
                         todayStepEngineV2: true
                     });
@@ -5929,6 +6129,11 @@
                             calories: 0,
                             effortScore: 0,
                             effortStars: 0,
+                            activeMinutes: 0,
+                            recentSteps10m: 0,
+                            lastStepAt: 0,
+                            lastMotionAt: 0,
+                            motionState: 'waiting',
                             stepEngineV2: true
                         });
                     }
@@ -6155,6 +6360,9 @@
                     message: lang === 'ar' ? 'هل أنت متأكد من حذف هذا السجل المالي؟' : 'Are you sure you want to delete this record?',
                     onConfirm: async () => {
                         await db.collection(collection).doc(id).delete();
+                        if (window.AlOstaAuditLogger) {
+                            window.AlOstaAuditLogger.logEvent(db, adminId, 'delete_transaction', collection, id, { by: adminId });
+                        }
                         addToast(lang === 'ar' ? 'تم الحذف' : 'Deleted');
                     }
                 });
@@ -6179,6 +6387,9 @@
                             } else {
                                 await db.collection('workers').doc(w.id).delete();
                             }
+                            if (window.AlOstaAuditLogger) {
+                                window.AlOstaAuditLogger.logEvent(db, adminId, 'remove_worker', 'workers', w.id, { workerName: w.name || '' });
+                            }
                             addToast(lang === 'ar' ? 'تمت إزالة العامل' : 'Removed');
                         } catch (e) { addToast('Error'); }
                     }
@@ -6194,10 +6405,21 @@
                         try {
                             const batch = db.batch();
                             const settledAt = todayStr();
-                            data.attendance.filter(a => a.workerId === w.id && !a.settled).forEach(a => batch.update(db.collection('attendance').doc(a.id), { settled: true, settledDate: settledAt }));
-                            data.advances.filter(a => a.workerId === w.id && !a.settled).forEach(a => batch.update(db.collection('advances').doc(a.id), { settled: true, settledDate: settledAt }));
-                            data.expenses.filter(e => e.paidByWorkerId === w.id && !e.settled).forEach(e => batch.update(db.collection('expenses').doc(e.id), { settled: true, settledDate: settledAt }));
+                            const attItems = data.attendance.filter(a => a.workerId === w.id && !a.settled);
+                            const advItems = data.advances.filter(a => a.workerId === w.id && !a.settled);
+                            const expItems = data.expenses.filter(e => e.paidByWorkerId === w.id && !e.settled);
+                            attItems.forEach(a => batch.update(db.collection('attendance').doc(a.id), { settled: true, settledDate: settledAt }));
+                            advItems.forEach(a => batch.update(db.collection('advances').doc(a.id), { settled: true, settledDate: settledAt }));
+                            expItems.forEach(e => batch.update(db.collection('expenses').doc(e.id), { settled: true, settledDate: settledAt }));
                             await batch.commit();
+                            if (window.AlOstaAuditLogger) {
+                                window.AlOstaAuditLogger.logEvent(db, adminId, 'settle_worker', 'workers', w.id, {
+                                    workerName: w.name || '',
+                                    attendanceCount: attItems.length,
+                                    advancesCount: advItems.length,
+                                    materialsCount: expItems.length
+                                });
+                            }
                             addToast(lang === 'ar' ? 'تمت تصفية الحساب بنجاح ✓' : 'Settled Successfully ✓');
                         } catch (e) { addToast('Error'); }
                     }
@@ -6576,7 +6798,25 @@
                                     <h1 className="font-black text-sm text-slate-800 dark:text-slate-100 truncate max-w-[165px] leading-tight">
                                         {selectedProject ? selectedProject.title : adminId}
                                     </h1>
-                                    <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" title={lang === 'ar' ? 'متصل وجاهز للعمل الميداني' : 'Field Ready'}></span>
+                                    <span
+                                        className={`w-2 h-2 rounded-full shrink-0 ${
+                                            syncStatusInfo.status === 'offline' || syncStatusInfo.pendingCount > 0
+                                                ? 'bg-amber-500 animate-pulse'
+                                                : syncStatusInfo.status === 'syncing'
+                                                    ? 'bg-indigo-500 animate-pulse'
+                                                    : 'bg-emerald-500'
+                                        }`}
+                                        title={
+                                            syncStatusInfo.pendingCount > 0
+                                                ? (lang === 'ar' ? `بانتظار المزامنة (${syncStatusInfo.pendingCount})` : `Pending sync (${syncStatusInfo.pendingCount})`)
+                                                : (lang === 'ar' ? 'متصل ومتزامن مع السحابة' : 'Synced with Cloud')
+                                        }
+                                    ></span>
+                                    {syncStatusInfo.pendingCount > 0 && (
+                                        <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-amber-100 dark:bg-amber-950/70 text-amber-700 dark:text-amber-300 shrink-0">
+                                            ⏳ {syncStatusInfo.pendingCount}
+                                        </span>
+                                    )}
                                     {!selectedProject && isContractorPro && (
                                         <button
                                             type="button"
@@ -8473,6 +8713,43 @@
                                 <button onClick={() => setModals({ work: true })} className="w-full p-3.5 border-2 border-dashed border-indigo-300 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 font-black rounded-2xl flex justify-center items-center gap-2 btn-press mb-2 bg-indigo-50/50 dark:bg-indigo-900/10">
                                     <Icon name="user-plus" size={18} /> {tr('addWorker')}
                                 </button>
+                                {(() => {
+                                    const crewSum = (window.AlOstaActivityEngine && typeof window.AlOstaActivityEngine.summarizeCrewActivity === 'function')
+                                        ? window.AlOstaActivityEngine.summarizeCrewActivity(data.workers || [], data.attendance || [], activityNowMs, todayStr(), lang)
+                                        : null;
+                                    if (!crewSum || crewSum.onShiftTotal <= 0) return null;
+                                    return (
+                                        <div className="bg-white dark:bg-slate-800 p-3 rounded-2xl border border-indigo-100 dark:border-slate-700 shadow-xs space-y-2">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[11px] font-black text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+                                                    <Icon name="activity" size={14} className="text-indigo-600 dark:text-indigo-400" />
+                                                    <span>{lang === 'ar' ? `مراقبة نشاط الكادر المباشرة (${crewSum.onShiftTotal} في المناوبة)` : `Live Crew Activity (${crewSum.onShiftTotal} On Shift)`}</span>
+                                                </span>
+                                                <span className="text-[9px] font-bold text-slate-400">
+                                                    {lang === 'ar' ? 'تحديث تلقائي' : 'Auto-live'}
+                                                </span>
+                                            </div>
+                                            <div className="grid grid-cols-4 gap-1.5 text-center text-[10px] font-black">
+                                                <div className="bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 py-1.5 px-1 rounded-xl border border-emerald-200/70 dark:border-emerald-800/60">
+                                                    <div>🟢 {crewSum.active}</div>
+                                                    <div className="text-[8.5px] font-bold opacity-80">{lang === 'ar' ? 'يعمل الآن' : 'Active'}</div>
+                                                </div>
+                                                <div className="bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 py-1.5 px-1 rounded-xl border border-amber-200/70 dark:border-amber-800/60">
+                                                    <div>🟡 {crewSum.idle}</div>
+                                                    <div className="text-[8.5px] font-bold opacity-80">{lang === 'ar' ? 'متوقف/راحة' : 'Idle'}</div>
+                                                </div>
+                                                <div className="bg-orange-50 dark:bg-orange-950/40 text-orange-700 dark:text-orange-300 py-1.5 px-1 rounded-xl border border-orange-200/70 dark:border-orange-800/60">
+                                                    <div>🟠 {crewSum.outOfSite}</div>
+                                                    <div className="text-[8.5px] font-bold opacity-80">{lang === 'ar' ? 'خارج الموقع' : 'Outside'}</div>
+                                                </div>
+                                                <div className="bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 py-1.5 px-1 rounded-xl border border-slate-200 dark:border-slate-700">
+                                                    <div>⚪ {crewSum.offline}</div>
+                                                    <div className="text-[8.5px] font-bold opacity-80">{lang === 'ar' ? 'منقطع' : 'Offline'}</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
                                 {isInitialSyncing && (data.workers || []).length === 0 ? (
                                     <SkeletonList count={3} variant="card" />
                                 ) : (
@@ -8557,19 +8834,20 @@
 
                                                 {(() => {
                                                     const todayRec = data.attendance.find(a => a.workerId === w.id && a.date === todayStr());
-                                                    const isOnShiftToday = Boolean(todayRec && todayRec.status !== 'absent' && todayRec.timeIn && !todayRec.timeOut);
                                                     const currentSteps = getVerifiedWorkerTodaySteps(w, todayRec, todayStr());
-                                                    const isWorkerSensorConnected = Boolean(
-                                                        isOnShiftToday && (
-                                                            currentSteps > 0 ||
-                                                            (w.todayEffortDate === todayStr() && w.sensorConnected === true) ||
-                                                            (todayRec && todayRec.sensorConnected === true)
-                                                        )
-                                                    );
-                                                    const eff = getEffortInfo(currentSteps, lang);
+                                                    const activeMinutes = getVerifiedWorkerActiveMinutes(w, todayRec, todayStr());
+                                                    const liveStatus = getWorkerLiveStatus(w, todayRec, activityNowMs, lang);
+                                                    const eff = getEffortInfo(currentSteps, lang, w.specialty || '', activeMinutes);
                                                     const radius = 28;
                                                     const circumference = 2 * Math.PI * radius;
                                                     const strokeDashoffset = circumference - (eff.effortScore / 100) * circumference;
+                                                    const ringColor = liveStatus.code === 'active'
+                                                        ? '#10b981'
+                                                        : liveStatus.code === 'idle'
+                                                            ? '#f59e0b'
+                                                            : liveStatus.code === 'out_of_site'
+                                                                ? '#f97316'
+                                                                : '#4f46e5';
                                                     return (
                                                         <div className="bg-slate-50/90 dark:bg-slate-900/80 p-3 rounded-2xl border border-indigo-100 dark:border-slate-700/80 space-y-2.5">
                                                             <div className="flex items-center gap-3">
@@ -8580,7 +8858,7 @@
                                                                             cx="34"
                                                                             cy="34"
                                                                             r={radius}
-                                                                            stroke="#4f46e5"
+                                                                            stroke={ringColor}
                                                                             strokeWidth="5.5"
                                                                             strokeDasharray={circumference}
                                                                             strokeDashoffset={strokeDashoffset}
@@ -8597,45 +8875,55 @@
                                                                 <div className="flex-1 min-w-0">
                                                                     <div className="flex items-center justify-between gap-1">
                                                                         <h4 className="font-black text-xs text-slate-800 dark:text-slate-100 truncate">
-                                                                            {lang === 'ar' ? 'مؤشر الجهد البدني وعداد الخطوات' : 'Step Counter & Effort Index'}
+                                                                            {lang === 'ar' ? 'مؤشر النشاط والجهد المباشر' : 'Live Activity & Effort Index'}
                                                                         </h4>
-                                                                        {currentSteps > 0 && (
-                                                                            <button
-                                                                                type="button"
-                                                                                onClick={() => resetWorkerStepsToday(w, todayRec)}
-                                                                                className="px-2 py-0.5 rounded-lg bg-rose-50 dark:bg-rose-950/50 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800 text-[9px] font-black shrink-0 active:scale-95"
-                                                                            >
-                                                                                {lang === 'ar' ? 'تصفير' : 'Reset'}
-                                                                            </button>
-                                                                        )}
+                                                                        <div className="flex items-center gap-1 shrink-0">
+                                                                            <span className={`px-2 py-0.5 rounded-full text-[9px] font-black border ${liveStatus.pillClass}`}>
+                                                                                {liveStatus.dot} {liveStatus.shortLabel}
+                                                                            </span>
+                                                                            {(currentSteps > 0 || activeMinutes > 0) && (
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => resetWorkerStepsToday(w, todayRec)}
+                                                                                    className="px-2 py-0.5 rounded-lg bg-rose-50 dark:bg-rose-950/50 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800 text-[9px] font-black active:scale-95"
+                                                                                >
+                                                                                    {lang === 'ar' ? 'تصفير' : 'Reset'}
+                                                                                </button>
+                                                                            )}
+                                                                        </div>
                                                                     </div>
-                                                                    <p className="text-[10px] font-bold text-slate-400 mt-0.5">
-                                                                        {isOnShiftToday
-                                                                            ? (isWorkerSensorConnected
-                                                                                ? (lang === 'ar' ? '🟢 نشط الآن في الموقع (متصل بحساس حركة العامل مباشر)' : '🟢 Active on site (Worker motion sensor connected)')
-                                                                                : (lang === 'ar' ? '🟢 نشط الآن في الموقع (بانتظار فتح العامل للتطبيق على هاتفه)' : '🟢 Active on site (Waiting for worker phone connection)'))
-                                                                            : (lang === 'ar' ? '⏸ متوقف (يعمل فقط بعد تسجيل حضور العامل بالموقع)' : '⏸ Paused (tracks only after on-site clock-in)')}
+                                                                    <p className={`text-[10px] font-bold mt-1 leading-snug ${liveStatus.textClass}`}>
+                                                                        {liveStatus.title}
                                                                     </p>
-                                                                    <div className="mt-1.5 flex items-center gap-2">
+                                                                    <div className="mt-1.5 flex items-center gap-2 flex-wrap">
                                                                         <span className={`px-2 py-0.5 rounded-lg text-[10px] font-black ${eff.badgeClass}`}>
                                                                             {eff.label}
                                                                         </span>
                                                                         <StarRating rating={eff.effortStars} max={6} />
+                                                                        {eff.tradeType === 'stationary' && (
+                                                                            <span className="text-[8.5px] font-bold text-slate-400 bg-white dark:bg-slate-800 px-1.5 py-0.5 rounded border dark:border-slate-700">
+                                                                                {lang === 'ar' ? 'معاير لحرفة ثابتة' : 'Stationary trade'}
+                                                                            </span>
+                                                                        )}
                                                                     </div>
                                                                 </div>
                                                             </div>
-                                                            <div className="grid grid-cols-3 gap-2 text-center bg-white dark:bg-slate-800 p-2 rounded-xl border dark:border-slate-700">
+                                                            <div className="grid grid-cols-4 gap-1.5 text-center bg-white dark:bg-slate-800 p-2 rounded-xl border dark:border-slate-700">
                                                                 <div>
-                                                                    <p className="text-[9px] font-bold text-slate-400">{lang === 'ar' ? '👣 الخطوات اليوم' : '👣 Steps Today'}</p>
-                                                                    <p className="text-xs font-black text-indigo-600 dark:text-indigo-400 dir-ltr">{eff.steps.toLocaleString('en-US')}</p>
+                                                                    <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '👣 الخطوات' : '👣 Steps'}</p>
+                                                                    <p className="text-[11px] font-black text-indigo-600 dark:text-indigo-400 dir-ltr">{eff.steps.toLocaleString('en-US')}</p>
                                                                 </div>
                                                                 <div>
-                                                                    <p className="text-[9px] font-bold text-slate-400">{lang === 'ar' ? '📍 المسافة المقطوعة' : '📍 Distance'}</p>
-                                                                    <p className="text-xs font-black text-emerald-600 dark:text-emerald-400 dir-ltr">{eff.distanceMeters}m</p>
+                                                                    <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '⏱ عمل نشط' : '⏱ Active'}</p>
+                                                                    <p className="text-[11px] font-black text-teal-600 dark:text-teal-400 dir-ltr">{activeMinutes}{lang === 'ar' ? 'د' : 'm'}</p>
                                                                 </div>
                                                                 <div>
-                                                                    <p className="text-[9px] font-bold text-slate-400">{lang === 'ar' ? '🔥 طاقة مبذولة' : '🔥 Calories'}</p>
-                                                                    <p className="text-xs font-black text-amber-500 dir-ltr">{eff.calories} kcal</p>
+                                                                    <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '📍 المسافة' : '📍 Dist'}</p>
+                                                                    <p className="text-[11px] font-black text-emerald-600 dark:text-emerald-400 dir-ltr">{eff.distanceMeters}m</p>
+                                                                </div>
+                                                                <div>
+                                                                    <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '🔥 الطاقة' : '🔥 Energy'}</p>
+                                                                    <p className="text-[11px] font-black text-amber-500 dir-ltr">{eff.calories}</p>
                                                                 </div>
                                                             </div>
                                                         </div>
@@ -8813,16 +9101,23 @@
                                                     )}
                                                     {(() => {
                                                         const stepCount = getVerifiedWorkerTodaySteps(w, r, selectedDate);
-                                                        const eff = getEffortInfo(stepCount, lang);
+                                                        const activeMin = getVerifiedWorkerActiveMinutes(w, r, selectedDate);
+                                                        const eff = getEffortInfo(stepCount, lang, w.specialty || '', activeMin);
+                                                        const liveSt = selectedDate === todayStr() ? getWorkerLiveStatus(w, r, activityNowMs, lang) : null;
                                                         return (
                                                             <div className="flex flex-col gap-2">
-                                                                <div className="flex justify-between items-center gap-1">
+                                                                <div className="flex justify-between items-center gap-1 flex-wrap">
                                                                     <span className="flex items-center gap-1 text-indigo-600 dark:text-indigo-400 font-black">
                                                                         <Icon name="activity" size={13} />
-                                                                        <span>{lang === 'ar' ? `مؤشر الجهد البدني: ${eff.steps.toLocaleString('en-US')} خطوة (${eff.distanceMeters}م • ${eff.calories} kcal)` : `Effort Index: ${eff.steps.toLocaleString('en-US')} steps (${eff.distanceMeters}m)`}</span>
+                                                                        <span>{lang === 'ar' ? `الجهد: ${eff.steps.toLocaleString('en-US')} خطوة • ${activeMin}د نشطة (${eff.distanceMeters}م)` : `Effort: ${eff.steps.toLocaleString('en-US')} steps • ${activeMin}m active`}</span>
                                                                     </span>
                                                                     <div className="flex items-center gap-1">
-                                                                        {stepCount > 0 && selectedDate === todayStr() && (
+                                                                        {liveSt && liveSt.code !== 'off_shift' && (
+                                                                            <span className={`px-1.5 py-0.5 rounded-md text-[8.5px] font-black border ${liveSt.pillClass}`}>
+                                                                                {liveSt.dot} {liveSt.shortLabel}
+                                                                            </span>
+                                                                        )}
+                                                                        {(stepCount > 0 || activeMin > 0) && selectedDate === todayStr() && (
                                                                             <button
                                                                                 type="button"
                                                                                 onClick={() => resetWorkerStepsToday(w, r)}
@@ -9888,15 +10183,15 @@
                                             </div>
                                         ))}
                                         {records.map(a => {
-                                            const eff = getEffortInfo(getVerifiedRecordSteps(a), lang);
+                                            const eff = getEffortInfo(getVerifiedRecordSteps(a), lang, historyWorker?.specialty || '', parseInt(a.activeMinutes) || 0);
                                             return (
                                                 <div key={a.id} className="bg-slate-50 dark:bg-slate-900 p-3 rounded-xl border dark:border-slate-700 flex justify-between items-center">
                                                     <div>
                                                         <span className="font-bold text-sm block">{a.date}</span>
                                                         <span className="text-[10px] font-bold text-slate-400">{a.status === 'full' ? tr('fullDay') : a.status === 'half' ? tr('halfDay') : tr('absent')}</span>
-                                                        {eff.steps > 0 && (
+                                                        {(eff.steps > 0 || eff.activeMinutes > 0) && (
                                                             <span className="text-[10px] font-black text-indigo-600 dark:text-indigo-400 block mt-0.5">
-                                                                👣 {eff.steps.toLocaleString('en-US')} {lang === 'ar' ? 'خطوة' : 'steps'} ({eff.effortScore}% • {eff.label})
+                                                                👣 {eff.steps.toLocaleString('en-US')} {lang === 'ar' ? 'خطوة' : 'steps'}{eff.activeMinutes > 0 ? ` • ⏱ ${eff.activeMinutes}${lang === 'ar' ? 'د' : 'm'}` : ''} ({eff.effortScore}% • {eff.label})
                                                             </span>
                                                         )}
                                                     </div>
@@ -9916,11 +10211,14 @@
                     <Modal isOpen={modals.rate} onClose={() => setModals({})} title={tr('rate')}>
                         <div className="space-y-4 py-2">
                             {ratingWorker && view !== 'market' && (ratingWorker.adminId === adminId || data.workers.some(w => w.id === ratingWorker.id)) && (() => {
-                                const workerAtts = data.attendance.filter(a => a.workerId === ratingWorker.id && getVerifiedRecordSteps(a) > 0);
+                                const workerAtts = data.attendance.filter(a => a.workerId === ratingWorker.id && (getVerifiedRecordSteps(a) > 0 || (parseInt(a.activeMinutes) || 0) > 0));
                                 const avgSteps = workerAtts.length > 0
                                     ? Math.round(workerAtts.reduce((s, a) => s + getVerifiedRecordSteps(a), 0) / workerAtts.length)
                                     : (ratingWorker.todayStepEngineV2 ? (ratingWorker.todaySteps || 0) : 0);
-                                const eff = getEffortInfo(avgSteps, lang);
+                                const avgActiveMin = workerAtts.length > 0
+                                    ? Math.round(workerAtts.reduce((s, a) => s + (parseInt(a.activeMinutes) || 0), 0) / workerAtts.length)
+                                    : (ratingWorker.todayStepEngineV2 ? (ratingWorker.todayActiveMinutes || 0) : 0);
+                                const eff = getEffortInfo(avgSteps, lang, ratingWorker.specialty || '', avgActiveMin);
                                 return (
                                     <div className="bg-indigo-50/80 dark:bg-indigo-950/40 p-3.5 rounded-2xl border border-indigo-200 dark:border-indigo-800 space-y-2">
                                         <div className="flex justify-between items-center">
@@ -11166,10 +11464,20 @@
             const [shiftElapsedStr, setShiftElapsedStr] = useState('00:00:00');
             const outOfBoundsAlertSentRef = useRef({});
             const lastSyncedStepsRef = useRef(0);
+            const lastSyncedActiveMinRef = useRef(0);
+            const lastSyncedInBoundsRef = useRef(null);
+            const liveGpsRef = useRef(liveGps);
+            useEffect(() => { liveGpsRef.current = liveGps; }, [liveGps]);
+
+            const [workerSyncing, setWorkerSyncing] = useState(true);
 
             useEffect(() => {
+                const wSyncTimer = setTimeout(() => setWorkerSyncing(false), 600);
                 const us = [
-                    db.collection('workers').doc(worker.id).onSnapshot(doc => { if (doc.exists) setLW({ id: doc.id, ...doc.data() }); }),
+                    db.collection('workers').doc(worker.id).onSnapshot(doc => {
+                        if (doc.exists) setLW({ id: doc.id, ...doc.data() });
+                        setWorkerSyncing(false);
+                    }),
                     db.collection('attendance').where('workerId', '==', worker.id).onSnapshot(s => {
                         const raw = s.docs.map(x => ({ id: x.id, ...x.data() }));
                         const a = dedupeAttendanceByWorkerDay(raw, true);
@@ -11182,13 +11490,13 @@
                         const assignedProjs = s.docs.map(x => ({ id: x.id, ...x.data() }));
                         setD(p => ({ ...p, assignedProjs }));
                     }),
-                    db.collection('notifications').where('workerId', '==', worker.id).onSnapshot(s => {
+                    db.collection('notifications').where('workerId', '==', worker.id).limit(100).onSnapshot(s => {
                         const allNotifs = s.docs.map(x => ({ id: x.id, ...x.data() }));
                         setPendingReq(allNotifs.find(x => x.date === todayStr() && x.status === 'unread' && x.type !== 'left_site' && x.type !== 'worker_material') || null);
                         setD(p => ({ ...p, pendingMats: allNotifs.filter(x => x.type === 'worker_material' && x.status === 'unread') }));
                     }),
-                    db.collection('market_requests').where('workerId', '==', worker.id).where('status', 'in', ['pending', 'invited']).onSnapshot(s => setMarketRequests(s.docs.map(x => ({ id: x.id, ...x.data() })))),
-                    db.collection('job_ads').where('status', '==', 'active').onSnapshot(s => {
+                    db.collection('market_requests').where('workerId', '==', worker.id).where('status', 'in', ['pending', 'invited']).limit(100).onSnapshot(s => setMarketRequests(s.docs.map(x => ({ id: x.id, ...x.data() })))),
+                    db.collection('job_ads').where('status', '==', 'active').limit(100).onSnapshot(s => {
                         setJobAds(s.docs.map(x => ({ id: x.id, ...x.data() })).filter(ad => ad.specialty === (lW.specialty || worker.specialty || 'عامل عادي')));
                     }),
                 ];
@@ -11200,7 +11508,10 @@
                         })
                     );
                 }
-                return () => us.forEach(u => u && u());
+                return () => {
+                    clearTimeout(wSyncTimer);
+                    us.forEach(u => u && u());
+                };
             }, [worker.id, lW.specialty, lW.adminId]);
 
             const allProjects = useMemo(() => {
@@ -11303,27 +11614,48 @@
                 }
             };
 
+            // Battery-optimized GPS: single check on load, continuous GPS radio ONLY while actively clocked in on shift
+            const isWorkerShiftRunning = Boolean(tA && tA.date === todayStr() && tA.status !== 'absent' && tA.timeIn && !tA.timeOut);
+
+            useEffect(() => {
+                try {
+                    if (window.AndroidApp && typeof window.AndroidApp.setGpsTrackingActive === 'function') {
+                        window.AndroidApp.setGpsTrackingActive(isWorkerShiftRunning);
+                    }
+                } catch (e) {}
+                return () => {
+                    try {
+                        if (window.AndroidApp && typeof window.AndroidApp.setGpsTrackingActive === 'function') {
+                            window.AndroidApp.setGpsTrackingActive(false);
+                        }
+                    } catch (e) {}
+                };
+            }, [isWorkerShiftRunning]);
+
             useEffect(() => {
                 let watchId = null;
                 let intervalId = null;
 
                 const pollGps = () => {
-                    requestGeolocation({ maximumAge: 3000, timeout: 8000 })
+                    requestGeolocation({ maximumAge: 5000, timeout: 8000 })
                         .then(pos => evaluateWorkerPosition(pos, true))
                         .catch(() => { });
                 };
 
                 pollGps();
-                intervalId = setInterval(pollGps, 8000);
 
-                if (navigator.geolocation && navigator.geolocation.watchPosition) {
-                    try {
-                        watchId = navigator.geolocation.watchPosition(
-                            pos => evaluateWorkerPosition(pos, true),
-                            () => { },
-                            { enableHighAccuracy: true, maximumAge: 3000, timeout: 10000 }
-                        );
-                    } catch (e) { }
+                // Only keep continuous polling & watchPosition alive while the worker is clocked-in on shift
+                if (isWorkerShiftRunning) {
+                    intervalId = setInterval(pollGps, 15000);
+                    if (navigator.geolocation && navigator.geolocation.watchPosition) {
+                        try {
+                            watchId = navigator.geolocation.watchPosition(
+                                pos => evaluateWorkerPosition(pos, true),
+                                () => { },
+                                { enableHighAccuracy: true, maximumAge: 5000, timeout: 12000 }
+                            );
+                        } catch (e) { }
+                    }
                 }
 
                 return () => {
@@ -11332,7 +11664,7 @@
                         try { navigator.geolocation.clearWatch(watchId); } catch (e) { }
                     }
                 };
-            }, [activeProject?.id, activeSiteCoords?.lat, activeSiteCoords?.lng, allowedRadius, tA?.id, tA?.timeOut]);
+            }, [activeProject?.id, activeSiteCoords?.lat, activeSiteCoords?.lng, allowedRadius, isWorkerShiftRunning]);
 
             const unreadCount = (pendingReq ? 1 : 0) + marketRequests.length;
             useAppNotifications(unreadCount, 'نظام أستاذ وعد | الأسطة', lang === 'ar' ? 'لديك إشعارات أو عروض عمل جديدة' : 'You have new notifications or job offers');
@@ -11358,13 +11690,7 @@
             }, [tA?.id, tA?.timeIn, tA?.timeOut]);
 
             // Keep hardware step sensor bound ONLY to shift active state & worker ID (never reset when step count updates!)
-            const isShiftActiveForSteps = Boolean(
-                tA &&
-                tA.date === todayStr() &&
-                tA.status !== 'absent' &&
-                tA.timeIn &&
-                !tA.timeOut
-            );
+            const isShiftActiveForSteps = isWorkerShiftRunning;
 
             useEffect(() => {
                 setNativeStepTracking(isShiftActiveForSteps, isShiftActiveForSteps ? lW.id : '');
@@ -11403,16 +11729,25 @@
                 }
 
                 // Mark worker device sensor as connected on shift start
-                db.collection('workers').doc(lW.id).update({
+                const initNowMs = Date.now();
+                const initGps = liveGpsRef.current || {};
+                const initPayload = {
                     todayEffortDate: todayStr(),
                     todayStepEngineV2: true,
                     sensorConnected: true,
-                    sensorUpdatedAt: Date.now()
-                }).catch(() => {});
+                    sensorUpdatedAt: initNowMs,
+                    lastHeartbeatAt: initNowMs,
+                    liveInBounds: typeof initGps.inBounds === 'boolean' ? initGps.inBounds : true,
+                    liveSiteDist: Number.isFinite(initGps.rawDist) ? Math.round(initGps.rawDist) : null
+                };
+                db.collection('workers').doc(lW.id).update(initPayload).catch(() => {});
                 if (tA?.id) {
                     db.collection('attendance').doc(tA.id).update({
                         stepEngineV2: true,
-                        sensorConnected: true
+                        sensorConnected: true,
+                        sensorUpdatedAt: initNowMs,
+                        lastHeartbeatAt: initNowMs,
+                        liveInBounds: initPayload.liveInBounds
                     }).catch(() => {});
                 }
 
@@ -11421,21 +11756,47 @@
                     const m = readNativeStepMetrics(lW.id);
                     const verifiedRecSteps = getVerifiedRecordSteps(tA);
                     const currentSteps = Math.max(m.steps || 0, verifiedRecSteps);
+                    const recActiveMin = (tA && tA.stepEngineV2 === true) ? (parseInt(tA.activeMinutes) || 0) : 0;
+                    const currentActiveMin = Math.max(m.activeMinutes || 0, recActiveMin);
                     // Live local UI update (0 cloud cost)
-                    setStepMetrics({ ...m, steps: currentSteps });
+                    setStepMetrics({ ...m, steps: currentSteps, activeMinutes: currentActiveMin });
 
-                    const eff = getEffortInfo(currentSteps, lang);
+                    const eff = getEffortInfo(currentSteps, lang, lW.specialty || '', currentActiveMin);
                     const stepDelta = Math.abs(currentSteps - lastSyncedStepsRef.current);
+                    const activeMinDelta = Math.abs(currentActiveMin - lastSyncedActiveMinRef.current);
+                    const gpsNow = liveGpsRef.current || {};
+                    const currentInBounds = typeof gpsNow.inBounds === 'boolean' ? gpsNow.inBounds : null;
+                    const inBoundsChanged = currentInBounds !== null && lastSyncedInBoundsRef.current !== currentInBounds;
                     const nowMs = Date.now();
-                    // Batch cloud writes: sync on forceSync, or >= 25 new steps, or >= 45s elapsed with >= 5 new steps
-                    const shouldWriteCloud = currentSteps > 0 && (
+                    const elapsedSinceSync = nowMs - lastCloudSyncTime;
+
+                    // Precision heartbeat & batch sync:
+                    // - forceSync (shift start / resume)
+                    // - >= 25 new steps
+                    // - >= 5 new steps after 45s
+                    // - >= 2 new activeMinutes after 60s (captures stationary craft work!)
+                    // - 3-minute heartbeat (180s) even while idle so contractor sees exact idle vs offline status
+                    // - GPS geofence boundary transition (inBounds <-> outOfBounds)
+                    const shouldWriteCloud = (
                         forceSync ||
+                        inBoundsChanged ||
                         stepDelta >= 25 ||
-                        (stepDelta >= 5 && (nowMs - lastCloudSyncTime) >= 45000)
+                        (stepDelta >= 5 && elapsedSinceSync >= 45000) ||
+                        (activeMinDelta >= 2 && elapsedSinceSync >= 60000) ||
+                        elapsedSinceSync >= 180000
                     );
                     if (shouldWriteCloud) {
                         lastSyncedStepsRef.current = currentSteps;
+                        lastSyncedActiveMinRef.current = currentActiveMin;
+                        if (currentInBounds !== null) lastSyncedInBoundsRef.current = currentInBounds;
                         lastCloudSyncTime = nowMs;
+
+                        const lastStepAt = Math.max(Number(m.lastStepAt || 0), Number(tA?.lastStepAt || 0));
+                        const lastMotionAt = Math.max(Number(m.lastMotionAt || 0), lastStepAt, Number(tA?.lastMotionAt || 0));
+                        const recentSteps10m = Math.max(0, parseInt(m.recentSteps10m, 10) || 0);
+                        const motionState = m.motionState || (lastMotionAt > 0 && (nowMs - lastMotionAt) <= 600000 ? 'active' : 'idle');
+                        const siteDistRounded = Number.isFinite(gpsNow.rawDist) ? Math.round(gpsNow.rawDist) : null;
+
                         try {
                             await db.collection('workers').doc(lW.id).update({
                                 todaySteps: eff.steps,
@@ -11443,10 +11804,18 @@
                                 todayCalories: eff.calories,
                                 todayEffortScore: eff.effortScore,
                                 todayEffortStars: eff.effortStars,
+                                todayActiveMinutes: currentActiveMin,
+                                todayRecentSteps10m: recentSteps10m,
                                 todayEffortDate: todayStr(),
                                 todayStepEngineV2: true,
                                 sensorConnected: true,
-                                sensorUpdatedAt: nowMs
+                                sensorUpdatedAt: nowMs,
+                                lastHeartbeatAt: nowMs,
+                                lastStepAt,
+                                lastMotionAt,
+                                motionState,
+                                ...(currentInBounds !== null ? { liveInBounds: currentInBounds } : {}),
+                                ...(siteDistRounded !== null ? { liveSiteDist: siteDistRounded } : {})
                             });
                             if (tA?.id) {
                                 await db.collection('attendance').doc(tA.id).update({
@@ -11455,8 +11824,16 @@
                                     calories: eff.calories,
                                     effortScore: eff.effortScore,
                                     effortStars: eff.effortStars,
+                                    activeMinutes: currentActiveMin,
+                                    recentSteps10m,
                                     stepEngineV2: true,
-                                    sensorConnected: true
+                                    sensorConnected: true,
+                                    sensorUpdatedAt: nowMs,
+                                    lastHeartbeatAt: nowMs,
+                                    lastStepAt,
+                                    lastMotionAt,
+                                    motionState,
+                                    ...(currentInBounds !== null ? { liveInBounds: currentInBounds } : {})
                                 });
                             }
                         } catch (e) { }
@@ -11478,7 +11855,7 @@
                     document.removeEventListener('visibilitychange', handleResume);
                     window.removeEventListener('focus', handleResume);
                 };
-            }, [isShiftActiveForSteps, lW.id, tA?.id, lang]);
+            }, [isShiftActiveForSteps, lW.id, lW.specialty, tA?.id, lang]);
 
             const requestClockIn = async () => {
                 if (!activeProject) {
@@ -11641,7 +12018,8 @@
 
                     setNativeStepTracking(false, '');
                     const m = readNativeStepMetrics(lW.id);
-                    const eff = getEffortInfo(Math.max(m.steps || 0, getVerifiedRecordSteps(tA)), lang);
+                    const finalActiveMin = Math.max(m.activeMinutes || 0, parseInt(tA.activeMinutes) || 0);
+                    const eff = getEffortInfo(Math.max(m.steps || 0, getVerifiedRecordSteps(tA)), lang, lW.specialty || '', finalActiveMin);
 
                     await db.collection('attendance').doc(tA.id).update({
                         timeOut: Date.now(),
@@ -11653,8 +12031,24 @@
                         calories: eff.calories,
                         effortScore: eff.effortScore,
                         effortStars: eff.effortStars,
+                        activeMinutes: finalActiveMin,
+                        sensorConnected: false,
+                        motionState: 'off_shift',
                         stepEngineV2: true
                     });
+                    db.collection('workers').doc(lW.id).update({
+                        todaySteps: eff.steps,
+                        todayDistanceMeters: eff.distanceMeters,
+                        todayCalories: eff.calories,
+                        todayEffortScore: eff.effortScore,
+                        todayEffortStars: eff.effortStars,
+                        todayActiveMinutes: finalActiveMin,
+                        sensorConnected: false,
+                        motionState: 'off_shift',
+                        lastHeartbeatAt: Date.now(),
+                        todayEffortDate: todayStr(),
+                        todayStepEngineV2: true
+                    }).catch(() => {});
                     if (status === 'invalid' && activeProject) {
                         await db.collection('notifications').add({
                             date: todayStr(),
@@ -11850,6 +12244,9 @@
                     </header>
 
                     <main className="flex-1 overflow-y-auto p-4 pb-20 space-y-4 relative">
+                        {workerSyncing && d.atts.length === 0 && allProjects.length === 0 && (
+                            <SkeletonList count={3} variant="card" />
+                        )}
                         {leftSiteWarning && (
                             <div className="bg-rose-600 text-white p-4 rounded-3xl shadow-xl border-2 border-rose-300 animate-enter">
                                 <div className="flex items-start gap-3">
@@ -12009,9 +12406,46 @@
                                         <span className="font-mono font-black text-base text-slate-800 dark:text-slate-100 dir-ltr tracking-wider">{shiftElapsedStr}</span>
                                     </div>
 
+                                    {(() => {
+                                        const liveEff = getEffortInfo(stepMetrics.steps || 0, lang, lW.specialty || '', stepMetrics.activeMinutes || 0);
+                                        const isMoving = stepMetrics.motionState === 'active';
+                                        const isIdle = stepMetrics.motionState === 'idle';
+                                        return (
+                                            <div className="my-2.5 bg-slate-50 dark:bg-slate-900/80 p-3 rounded-2xl border border-indigo-100 dark:border-slate-700 space-y-2 text-right">
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <span className="text-[10.5px] font-black text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+                                                        <Icon name="activity" size={14} className="text-indigo-600 dark:text-indigo-400" />
+                                                        <span>{lang === 'ar' ? 'قياس الجهد والنشاط المباشر' : 'Live Activity & Effort'}</span>
+                                                    </span>
+                                                    <span className={`px-2 py-0.5 rounded-full text-[9px] font-black ${isMoving ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300' : isIdle ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300' : 'bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-300'}`}>
+                                                        {isMoving
+                                                            ? (lang === 'ar' ? '🟢 نشط الآن' : '🟢 Active')
+                                                            : isIdle
+                                                                ? (lang === 'ar' ? `🟡 توقف ${stepMetrics.idleMinutes || 10}د` : `🟡 Idle ${stepMetrics.idleMinutes || 10}m`)
+                                                                : (lang === 'ar' ? '📡 حساس الخلفية شغال' : '📡 Sensor Ready')}
+                                                    </span>
+                                                </div>
+                                                <div className="grid grid-cols-3 gap-2 text-center bg-white dark:bg-slate-800 p-2 rounded-xl border dark:border-slate-700">
+                                                    <div>
+                                                        <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '👣 الخطوات' : '👣 Steps'}</p>
+                                                        <p className="text-xs font-black text-indigo-600 dark:text-indigo-400 dir-ltr">{liveEff.steps.toLocaleString('en-US')}</p>
+                                                    </div>
+                                                    <div>
+                                                        <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '⏱ عمل نشط' : '⏱ Active'}</p>
+                                                        <p className="text-xs font-black text-teal-600 dark:text-teal-400 dir-ltr">{liveEff.activeMinutes}{lang === 'ar' ? 'د' : 'm'}</p>
+                                                    </div>
+                                                    <div>
+                                                        <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '⚡ الجهد' : '⚡ Effort'}</p>
+                                                        <p className="text-xs font-black text-emerald-600 dark:text-emerald-400 dir-ltr">{liveEff.effortScore}%</p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
+
                                     {activeSiteCoords && (
                                         <p className="text-[11px] font-bold text-slate-400 mb-2">
-                                            {lang === 'ar' ? 'الرادار الجغرافي يراقب وجودك في موقع العمل تلقائياً' : 'GPS Radar is actively monitoring site presence'}
+                                            {lang === 'ar' ? 'الرادار الجغرافي وحساس النشاط يعملان تلقائياً أثناء المناوبة' : 'GPS Radar & Activity Sensor are active during shift'}
                                         </p>
                                     )}
                                     <button onClick={() => { haptic(); doClockOut(); }} disabled={gpsLoading} className="w-full bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400 py-4 rounded-2xl font-black mt-2 border border-rose-200 dark:border-rose-800 active:scale-95 flex items-center justify-center gap-2">
@@ -14344,61 +14778,231 @@
         };
 
         const IosInstallPrompt = () => {
-            const [open, setOpen] = useState(() => {
+            const DISMISS_KEY = 'ios_install_snooze_until_v2';
+            const [showGuide, setShowGuide] = useState(false);
+            const [copiedLink, setCopiedLink] = useState(false);
+            const [hasWebPrompt, setHasWebPrompt] = useState(() => Boolean(window.__deferredInstallPrompt));
+            const [showTopBar, setShowTopBar] = useState(() => {
                 try {
                     if (window.AndroidApp || window.IS_IOS_STANDALONE) return false;
-                    if (!window.IS_IOS_DEVICE) return false;
-                    return !localStorage.getItem('ios_install_dismissed_v1');
+                    if (!window.IS_IOS_DEVICE && !window.__deferredInstallPrompt) return false;
+                    const snoozeUntil = Number(localStorage.getItem(DISMISS_KEY) || 0);
+                    return Date.now() >= snoozeUntil;
                 } catch (e) {
-                    return false;
+                    return Boolean(window.IS_IOS_DEVICE);
                 }
             });
 
             useEffect(() => {
-                window.__showIosInstallGuide = () => setOpen(true);
-                return () => { window.__showIosInstallGuide = null; };
+                window.__showIosInstallGuide = () => {
+                    setShowGuide(true);
+                };
+                const onPromptReady = () => {
+                    setHasWebPrompt(true);
+                    try {
+                        const snoozeUntil = Number(localStorage.getItem(DISMISS_KEY) || 0);
+                        if (!window.AndroidApp && !window.IS_IOS_STANDALONE && Date.now() >= snoozeUntil) {
+                            setShowTopBar(true);
+                        }
+                    } catch (e) {
+                        setShowTopBar(true);
+                    }
+                };
+                window.addEventListener('alosta-pwa-prompt-ready', onPromptReady);
+                return () => {
+                    window.__showIosInstallGuide = null;
+                    window.removeEventListener('alosta-pwa-prompt-ready', onPromptReady);
+                };
             }, []);
 
-            if (!open || window.AndroidApp) return null;
+            if (window.AndroidApp || window.IS_IOS_STANDALONE) return null;
+
+            const isIos = Boolean(window.IS_IOS_DEVICE);
+            const isInAppBrowser = Boolean(window.IS_IOS_INAPP);
+
+            const snoozeBar = () => {
+                try {
+                    localStorage.setItem(DISMISS_KEY, String(Date.now() + 12 * 60 * 60 * 1000));
+                } catch (e) {}
+                setShowTopBar(false);
+            };
+
+            const handleInstallTap = async () => {
+                if (window.__deferredInstallPrompt) {
+                    try {
+                        window.__deferredInstallPrompt.prompt();
+                        const choice = await window.__deferredInstallPrompt.userChoice;
+                        if (choice && choice.outcome === 'accepted') {
+                            window.__deferredInstallPrompt = null;
+                            setHasWebPrompt(false);
+                            setShowTopBar(false);
+                            setShowGuide(false);
+                            return;
+                        }
+                    } catch (e) {}
+                }
+                setShowGuide(true);
+            };
+
+            const copySafariLink = () => {
+                const cleanUrl = window.location.href.split('#')[0];
+                try {
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(cleanUrl);
+                    } else {
+                        const ta = document.createElement('textarea');
+                        ta.value = cleanUrl;
+                        document.body.appendChild(ta);
+                        ta.select();
+                        document.execCommand('copy');
+                        document.body.removeChild(ta);
+                    }
+                    setCopiedLink(true);
+                    setTimeout(() => setCopiedLink(false), 3000);
+                } catch (e) {}
+            };
 
             return (
-                <div className="fixed bottom-4 left-3 right-3 z-[9990] max-w-md mx-auto animate-enter no-print" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
-                    <div className="bg-slate-900/95 text-white rounded-3xl p-4 shadow-2xl border border-indigo-400/30 space-y-2.5">
-                        <div className="flex items-start justify-between gap-2">
-                            <div className="flex items-center gap-2.5">
-                                <img src="./apple-touch-icon.png" alt="الأسطة" className="w-11 h-11 rounded-2xl shadow-md shrink-0" />
-                                <div>
-                                    <h3 className="text-sm font-black">تثبيت «الأسطة» على الآيفون 🍎</h3>
-                                    <p className="text-[11px] text-slate-300 font-bold">نفس تطبيق الأندرويد 100% — يعمل بملء الشاشة مع المزامنة الفورية</p>
+                <>
+                    {/* Native-Style Smart Top Install Banner (since iOS Safari hides native address-bar install buttons) */}
+                    {showTopBar && (isIos || hasWebPrompt) && !showGuide && (
+                        <div
+                            className="fixed top-2 left-2.5 right-2.5 z-[9985] max-w-md mx-auto animate-enter no-print"
+                            style={{ paddingTop: 'env(safe-area-inset-top)' }}
+                        >
+                            <div className="bg-slate-900/95 backdrop-blur-md text-white rounded-2xl px-3 py-2.5 shadow-2xl border border-indigo-400/40 flex items-center justify-between gap-2.5">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                    <img src="./apple-touch-icon.png" alt="الأسطة" className="w-10 h-10 rounded-xl shadow-md shrink-0" />
+                                    <div className="min-w-0">
+                                        <p className="text-xs font-black truncate">
+                                            {isIos ? 'تثبيت «الأسطة» على الآيفون 🍎' : 'تثبيت تطبيق «الأسطة» 📲'}
+                                        </p>
+                                        <p className="text-[10px] font-bold text-slate-300 truncate">
+                                            {isInAppBrowser
+                                                ? 'افتح الرابط في Safari أولاً لتثبيت التطبيق'
+                                                : 'إضافة مباشرة للشاشة الرئيسية بملء الشاشة'}
+                                        </p>
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                    <button
+                                        type="button"
+                                        onClick={handleInstallTap}
+                                        className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 text-white font-black text-xs shadow-md active:scale-95"
+                                    >
+                                        تثبيت 📲
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={snoozeBar}
+                                        aria-label="إغلاق"
+                                        className="w-7 h-7 rounded-lg bg-slate-800 text-slate-300 text-xs font-black flex items-center justify-center"
+                                    >
+                                        ✕
+                                    </button>
                                 </div>
                             </div>
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    try { localStorage.setItem('ios_install_dismissed_v1', '1'); } catch (e) {}
-                                    setOpen(false);
-                                }}
-                                className="p-1.5 rounded-xl bg-slate-800 text-slate-300 text-xs font-black shrink-0"
+                        </div>
+                    )}
+
+                    {/* Interactive Visual Safari Install Sheet */}
+                    {showGuide && (
+                        <div className="fixed inset-0 z-[9995] bg-slate-950/70 backdrop-blur-xs flex items-end justify-center p-3 no-print" onClick={() => setShowGuide(false)}>
+                            <div
+                                className="w-full max-w-md bg-slate-900 text-white rounded-3xl p-4 shadow-2xl border border-indigo-400/40 space-y-3 animate-enter"
+                                style={{ marginBottom: 'env(safe-area-inset-bottom)' }}
+                                onClick={(e) => e.stopPropagation()}
                             >
-                                ✕
-                            </button>
+                                <div className="flex items-start justify-between gap-2">
+                                    <div className="flex items-center gap-2.5">
+                                        <img src="./apple-touch-icon.png" alt="الأسطة" className="w-12 h-12 rounded-2xl shadow-md shrink-0" />
+                                        <div>
+                                            <h3 className="text-sm font-black">تثبيت تطبيق «الأسطة» على الآيفون 🍎</h3>
+                                            <p className="text-[10.5px] text-slate-300 font-bold leading-snug">
+                                                متصفح Safari لا يظهر زر تثبيت في الشريط تلقائياً — ثبّته في 5 ثوانٍ:
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowGuide(false)}
+                                        className="p-1.5 rounded-xl bg-slate-800 text-slate-300 text-xs font-black shrink-0"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+
+                                {isInAppBrowser ? (
+                                    <div className="bg-amber-500/15 border border-amber-400/40 rounded-2xl p-3.5 space-y-2.5 text-[11.5px] font-bold text-amber-100">
+                                        <p className="font-black text-amber-300">⚠️ أنت تفتح الرابط داخل متصفح داخلي (واتساب/تيليغرام/كروم)!</p>
+                                        <p className="leading-relaxed">
+                                            خيار <b>«إضافة إلى الصفحة الرئيسية»</b> يظهر فقط داخل متصفح <b>Safari</b> الأصلي في الآيفون.
+                                        </p>
+                                        <div className="bg-slate-950/60 rounded-xl p-2.5 text-[11px] text-slate-200 space-y-1">
+                                            <div>1️⃣ اضغط رمز البوصلة <b>🧭 (الفتح في Safari)</b> بالأسفل أو بالأعلى.</div>
+                                            <div>2️⃣ أو انسخ الرابط أدناه وافتحه مباشرة في تطبيق <b>Safari</b>:</div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={copySafariLink}
+                                            className="w-full py-2.5 rounded-xl bg-amber-400 text-slate-950 font-black text-xs active:scale-95"
+                                        >
+                                            {copiedLink ? '✓ تم نسخ الرابط — افتح Safari والصقه الآن' : '📋 نسخ الرابط لفتحه في Safari'}
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        <div className="bg-slate-800/90 rounded-2xl p-3 border border-slate-700 flex items-center gap-3">
+                                            <div className="w-10 h-10 rounded-xl bg-indigo-500/20 border border-indigo-400/40 flex items-center justify-center shrink-0 text-indigo-300">
+                                                {/* Authentic iOS Safari Share Icon */}
+                                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                                    <path d="M12 3v12" />
+                                                    <path d="M8 7l4-4 4 4" />
+                                                    <path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7" />
+                                                </svg>
+                                            </div>
+                                            <div className="text-[11.5px] font-bold text-slate-200 leading-relaxed">
+                                                <div><span className="text-indigo-300 font-black">1.</span> اضغط زر <b>المشاركة</b> في شريط Safari السفلي</div>
+                                                <div className="text-[10px] text-slate-400">(إذا كان الشريط مصغّراً اضغط <span className="font-mono text-white">•••</span> أولاً ثم المشاركة)</div>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-slate-800/90 rounded-2xl p-3 border border-slate-700 flex items-center gap-3">
+                                            <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center shrink-0 text-emerald-300">
+                                                {/* Authentic iOS Add to Home Screen [+] Icon */}
+                                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                                    <rect x="3" y="3" width="18" height="18" rx="4" />
+                                                    <path d="M12 8v8" />
+                                                    <path d="M8 12h8" />
+                                                </svg>
+                                            </div>
+                                            <div className="text-[11.5px] font-bold text-slate-200 leading-relaxed">
+                                                <div><span className="text-emerald-300 font-black">2.</span> مرّر القائمة واختر <b>«إضافة إلى الصفحة الرئيسية»</b></div>
+                                                <div className="text-[10px] text-slate-400">(Add to Home Screen) ثم اضغط <b>إضافة (Add)</b> بالأعلى ✓</div>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex flex-col items-center pt-1 text-indigo-300">
+                                            <span className="text-[10px] font-black">زر المشاركة موجود هنا بالأسفل في Safari</span>
+                                            <span className="text-lg animate-bounce leading-none mt-0.5">⬇</span>
+                                        </div>
+                                    </div>
+                                )}
+
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        snoozeBar();
+                                        setShowGuide(false);
+                                    }}
+                                    className="w-full py-2.5 rounded-xl bg-indigo-600 text-white font-black text-xs active:scale-95"
+                                >
+                                    حسناً، فهمت ✓
+                                </button>
+                            </div>
                         </div>
-                        <div className="bg-slate-800/90 rounded-2xl p-3 text-[11px] font-bold text-slate-200 space-y-1.5 border border-slate-700">
-                            <div>1️⃣ افتح الرابط في متصفح <b>Safari</b> على الآيفون واضغط زر المشاركة <b>⬆️ (Share)</b> بالأسفل.</div>
-                            <div>2️⃣ اختر <b>«إضافة إلى الصفحة الرئيسية / Add to Home Screen»</b> ثم اضغط <b>إضافة</b>.</div>
-                        </div>
-                        <button
-                            type="button"
-                            onClick={() => {
-                                try { localStorage.setItem('ios_install_dismissed_v1', '1'); } catch (e) {}
-                                setOpen(false);
-                            }}
-                            className="w-full py-2.5 rounded-xl bg-indigo-600 text-white font-black text-xs active:scale-95"
-                        >
-                            فهمت، المتابعة للتطبيق ✓
-                        </button>
-                    </div>
-                </div>
+                    )}
+                </>
             );
         };
 
@@ -14491,8 +15095,8 @@
         };
         ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     </script>
-    <script src="./vendor/alosta-engine.js?v=v1_0_14"></script>
-    <script src="./vendor/app-compiled.js?v=v1_0_14"></script>
+    <script src="./vendor/alosta-engine.js?v=v1_0_16"></script>
+    <script src="./vendor/app-compiled.js?v=v1_0_16"></script>
 </body>
 
 </html>

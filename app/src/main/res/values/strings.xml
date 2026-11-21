@@ -9,4 +9,7 @@
     <string name="print_job_name">كشف_رواتب_الأسطة</string>
     <string name="notification_channel_name">إشعارات الأسطة</string>
     <string name="notification_channel_desc">إشعارات طلبات الحضور وعروض العمل</string>
+    <string name="shift_monitor_channel_name">متابعة مناوبة العمل</string>
+    <string name="shift_monitor_channel_desc">قياس دقيق للخطوات والنشاط البدني أثناء وقت العمل</string>
+    <string name="shift_monitor_title">مناوبة العمل نشطة — الأسطة</string>
 </resources>

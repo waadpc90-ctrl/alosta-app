@@ -168,7 +168,10 @@ const server = http.createServer((req, res) => {
     }
 
     const ext = path.extname(filePath).toLowerCase();
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+    const baseName = path.basename(filePath).toLowerCase();
+    const contentType = baseName === 'manifest.json'
+      ? 'application/manifest+json; charset=utf-8'
+      : (MIME_TYPES[ext] || 'application/octet-stream');
 
     fs.readFile(filePath, (err, content) => {
       if (err) {
@@ -177,7 +180,7 @@ const server = http.createServer((req, res) => {
         return;
       }
       const headers = { 'Content-Type': contentType };
-      if (path.basename(filePath) === 'sw.js') {
+      if (baseName === 'sw.js') {
         headers['Service-Worker-Allowed'] = '/';
       }
       res.writeHead(200, headers);
