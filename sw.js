@@ -1,6 +1,6 @@
-const CACHE_NAME = 'alosta-pwa-v1.0.17';
+const CACHE_NAME = 'alosta-pwa-v1.0.18';
 const CORE_SHELL = [
-  './vendor/app-tailwind.css?v=v1_0_17',
+  './vendor/app-tailwind.css?v=v1_0_18',
   './vendor/react.production.min.js',
   './vendor/react-dom.production.min.js',
   './vendor/qrious.min.js',
@@ -8,8 +8,8 @@ const CORE_SHELL = [
   './vendor/firebase-auth.js',
   './vendor/firebase-firestore.js',
   './vendor/lucide.min.js',
-  './vendor/alosta-engine.js?v=v1_0_17',
-  './vendor/app-compiled.js?v=v1_0_17',
+  './vendor/alosta-engine.js?v=v1_0_18',
+  './vendor/app-compiled.js?v=v1_0_18',
   './apple-touch-icon.png',
   './app-icon-192.png',
   './app-icon-512.png'
@@ -44,8 +44,17 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  const isHtmlOrManifest = req.mode === 'navigate' || url.endsWith('.html') || url.endsWith('.json') || url.endsWith('/');
-  if (isHtmlOrManifest) {
+  // Network-First for HTML, manifest, and our own app bundles so iOS/Web PWA users ALWAYS receive updates immediately
+  const isNetworkFirst =
+    req.mode === 'navigate' ||
+    url.endsWith('.html') ||
+    url.endsWith('.json') ||
+    url.endsWith('/') ||
+    url.includes('app-compiled.js') ||
+    url.includes('alosta-engine.js') ||
+    url.includes('app-tailwind.css');
+
+  if (isNetworkFirst) {
     event.respondWith(
       fetch(req)
         .then((res) => {
@@ -60,6 +69,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Cache-First for immutable third-party vendor libs and static icons
   event.respondWith(
     caches.match(req).then((cached) => {
       if (cached) return cached;

@@ -107,18 +107,22 @@ open class MainActivity : ComponentActivity() {
             android.graphics.drawable.ColorDrawable(android.graphics.Color.parseColor("#EEF2FF"))
         )
         createNotificationChannel()
-        // Only clear WebView disk caches when the installed app version actually changes
-        // (preserves warm-start performance, fonts, and image cache across normal launches)
+        // Clear WebView disk caches whenever versionCode OR build timestamp changes
+        // (guarantees every APK rebuild loads fresh assets immediately while keeping warm-start fast)
         try {
             val cachePrefs = getSharedPreferences("al_osta_cache_meta", Context.MODE_PRIVATE)
             val lastCacheVersion = cachePrefs.getInt("last_version_code", -1)
-            if (lastCacheVersion != BuildConfig.VERSION_CODE) {
+            val lastBuildTs = cachePrefs.getLong("last_build_ts", -1L)
+            if (lastCacheVersion != BuildConfig.VERSION_CODE || lastBuildTs != BuildConfig.BUILD_TIMESTAMP_MS) {
                 java.io.File(filesDir, "wv_cdn_cache").deleteRecursively()
                 java.io.File(filesDir, "jsx_compiled_cache").deleteRecursively()
                 val dataDirFile = java.io.File(applicationInfo.dataDir)
                 java.io.File(dataDirFile, "app_webview/Default/Code Cache").deleteRecursively()
                 java.io.File(dataDirFile, "app_webview/Default/Cache").deleteRecursively()
-                cachePrefs.edit().putInt("last_version_code", BuildConfig.VERSION_CODE).apply()
+                cachePrefs.edit()
+                    .putInt("last_version_code", BuildConfig.VERSION_CODE)
+                    .putLong("last_build_ts", BuildConfig.BUILD_TIMESTAMP_MS)
+                    .apply()
             }
         } catch (_: Exception) {
         }
@@ -135,7 +139,7 @@ open class MainActivity : ComponentActivity() {
         } else {
             "index.html"
         }
-        val cacheBuster = "v=20261116_${BuildConfig.VERSION_CODE}"
+        val cacheBuster = "v=${BuildConfig.VERSION_CODE}_${BuildConfig.BUILD_TIMESTAMP_MS}"
         val startUrl = if (deepLinkQuery != null) {
             "file:///android_asset/$basePage?$deepLinkQuery&$cacheBuster"
         } else {

@@ -3,7 +3,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.17";
+        const APP_VERSION = "1.0.18";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -247,11 +247,14 @@
                 const out = {};
                 Object.keys(patch || {}).forEach(k => {
                     const v = patch[k];
+                    if (v === undefined) return;
                     if (stripDeletes && isDeleteFieldSentinel(v)) {
                         return;
                     }
                     if (v && v.__smartOp) {
                         if (v._raw !== undefined) out[k] = v._raw;
+                    } else if (v && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype) {
+                        out[k] = toRawPatch(v, stripDeletes);
                     } else {
                         out[k] = v;
                     }
