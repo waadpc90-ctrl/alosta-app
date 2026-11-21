@@ -13302,11 +13302,6 @@
                         >
                             {mode === 'login' ? tr('newAccount') : tr('haveAccount')}
                         </button>
-
-                        <div className="mt-3 pt-3 border-t border-slate-100 dark:border-slate-700/60 flex items-center justify-center gap-1.5 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
-                            <Icon name="shield-check" size={13} />
-                            <span>{lang === 'ar' ? 'حماية الهوية الموثقة + تشفير (AES-256 + SHA-256)' : 'Verified Identity + Encrypted (AES-256 + SHA-256)'}</span>
-                        </div>
                     </div>
                 </div>
             );
