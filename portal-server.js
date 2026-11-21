@@ -39,7 +39,8 @@ const MIME_TYPES = {
   '.webp': 'image/webp',
   '.webmanifest': 'application/manifest+json',
   '.mp4': 'video/mp4',
-  '.apk': 'application/vnd.android.package-archive'
+  '.apk': 'application/vnd.android.package-archive',
+  '.zip': 'application/zip'
 };
 
 let currentPublicTunnelUrl = '';
@@ -134,9 +135,10 @@ const server = http.createServer((req, res) => {
       }
     }
 
-    if (pathname.toLowerCase().endsWith('.apk') || pathname.toLowerCase().endsWith('.mp4')) {
+    if (pathname.toLowerCase().endsWith('.apk') || pathname.toLowerCase().endsWith('.mp4') || pathname.toLowerCase().endsWith('.zip')) {
       const fileName = path.basename(pathname);
       const isMp4 = fileName.toLowerCase().endsWith('.mp4');
+      const isZip = fileName.toLowerCase().endsWith('.zip');
       let targetFilePath = path.join(__dirname, fileName);
       if (!fs.existsSync(targetFilePath)) {
         targetFilePath = path.join(__dirname, '.portal', fileName);
@@ -146,7 +148,7 @@ const server = http.createServer((req, res) => {
       }
       if (fs.existsSync(targetFilePath)) {
         const stat = fs.statSync(targetFilePath);
-        const mime = isMp4 ? 'video/mp4' : 'application/vnd.android.package-archive';
+        const mime = isMp4 ? 'video/mp4' : isZip ? 'application/zip' : 'application/vnd.android.package-archive';
         const range = req.headers.range;
         if (isMp4 && range) {
           const parts = range.replace(/bytes=/, '').split('-');

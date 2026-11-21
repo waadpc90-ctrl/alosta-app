@@ -49,8 +49,10 @@ class ExampleRobolectricTest {
     @Test
     fun storePortalSecurityPolicy_preventsFinancialAccountModificationFromPortalLink() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val indexHtml = context.assets.open("index.html").bufferedReader().use { it.readText() }
-        val dashHtml = context.assets.open("dashboard.html").bufferedReader().use { it.readText() }
+        val indexHtml = context.assets.open("index.html").bufferedReader().use { it.readText() } +
+            "\n" + context.assets.open("vendor/app-compiled.js").bufferedReader().use { it.readText() }
+        val dashHtml = context.assets.open("dashboard.html").bufferedReader().use { it.readText() } +
+            "\n" + context.assets.open("vendor/dashboard-compiled.js").bufferedReader().use { it.readText() }
 
         // 1. Verify getStoreAccountNumber never falls back to contact phone (storeObj.phone)
         assertFalse(

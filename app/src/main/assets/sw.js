@@ -51,6 +51,7 @@ self.addEventListener('fetch', (event) => {
     url.endsWith('.json') ||
     url.endsWith('/') ||
     url.includes('app-compiled.js') ||
+    url.includes('dashboard-compiled.js') ||
     url.includes('alosta-engine.js') ||
     url.includes('app-tailwind.css');
 

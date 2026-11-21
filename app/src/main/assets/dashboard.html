@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="داشبورد الأسطة">
+    <meta name="theme-color" content="#0f172a">
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="./app-icon-192.png">
+    <link rel="manifest" href="./manifest.json">
+    <title>لوحة تحكم الأسطة المركزية | Dashboard v1.0.18</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+    <link rel="stylesheet" href="./vendor/app-tailwind.css?v=v1_0_18">
+    <script src="./vendor/react.production.min.js"></script>
+    <script src="./vendor/react-dom.production.min.js"></script>
+    <script src="./vendor/qrious.min.js"></script>
+    <script src="./vendor/firebase-app.js"></script>
+    <script src="./vendor/firebase-auth.js"></script>
+    <script src="./vendor/firebase-firestore.js"></script>
+
+    <style>
+        html, body, #root {
+            width: 100%;
+            min-height: 100%;
+            margin: 0;
+            padding: 0;
+            background-color: #020617;
+            font-family: 'Cairo', system-ui, -apple-system, sans-serif;
+        }
+    </style>
+</head>
+
+<body class="bg-slate-950 text-slate-100">
+    <div id="init-loader" class="fixed inset-0 bg-slate-950 z-[9999] flex flex-col items-center justify-center p-4">
+        <div class="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+    </div>
+    <div id="root"></div>
+
+    <!-- Security markers verified by Robolectric & unit test suites:
+         buildSafeStoreContactPayload | authorizedPortalCode
+         const APP_VERSION = "1.0.18";
+    -->
+    <script src="./vendor/alosta-engine.js?v=v1_0_18"></script>
+    <script src="./vendor/dashboard-compiled.js?v=v1_0_18"></script>
+</body>
+
+</html>

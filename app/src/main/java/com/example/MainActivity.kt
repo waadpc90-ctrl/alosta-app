@@ -471,13 +471,19 @@ class AndroidAppBridge(
         }
     }
 
+    @Volatile
+    private var latestLocalDbJson: String? = null
+
     @JavascriptInterface
     fun loadLocalDb(): String {
         if (!isTrustedCallerOrigin()) return "{}"
+        latestLocalDbJson?.let { return it }
         return try {
             val prefs = context.getSharedPreferences("al_osta_local_db", Context.MODE_PRIVATE)
             val raw = prefs.getString("db_json", "{}") ?: "{}"
-            AlOstaSecurityVault.decryptAtRest(raw)
+            val decrypted = AlOstaSecurityVault.decryptAtRest(raw)
+            latestLocalDbJson = decrypted
+            decrypted
         } catch (e: Exception) {
             "{}"
         }
@@ -486,6 +492,7 @@ class AndroidAppBridge(
     @JavascriptInterface
     fun saveLocalDb(json: String?) {
         if (json == null || !isTrustedCallerOrigin()) return
+        latestLocalDbJson = json
         val appCtx = context.applicationContext
         localDbExecutor.execute {
             try {

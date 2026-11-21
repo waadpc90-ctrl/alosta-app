@@ -4474,7 +4474,7 @@
             );
             const contractorExpiryMs = adminProfile?.subscriptionExpiresAt ? new Date(adminProfile.subscriptionExpiresAt).getTime() : null;
             const isContractorExpired = Boolean(contractorExpiryMs && !isNaN(contractorExpiryMs) && contractorExpiryMs < Date.now());
-            const isContractorPro = Boolean(adminProfile?.isPro) && !isContractorExpired;
+            const isContractorPro = Boolean(adminProfile?.isPro || adminProfile?.isVerifiedPro) && !isContractorExpired;
             const contractorDaysLeft = contractorExpiryMs && !isNaN(contractorExpiryMs)
                 ? Math.max(0, Math.ceil((contractorExpiryMs - Date.now()) / 86400000))
                 : null;

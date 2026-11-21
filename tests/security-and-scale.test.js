@@ -235,6 +235,13 @@ test('5. Slim index.html, static pre-compiled Tailwind CSS, Service Worker v1.0.
     assert.ok(sw.includes('alosta-pwa-v1.0.18'));
     assert.ok(sw.includes('./vendor/app-tailwind.css?v=v1_0_18'));
     assert.ok(sw.includes("url.includes('app-compiled.js')"), 'sw.js must use Network-First for app-compiled.js');
+    assert.ok(sw.includes("url.includes('dashboard-compiled.js')"), 'sw.js must use Network-First for dashboard-compiled.js');
+
+    const assetDashHtml = fs.readFileSync(path.join(ROOT, 'app/src/main/assets/dashboard.html'), 'utf8');
+    const rootDashHtml = fs.readFileSync(path.join(ROOT, 'dashboard.html'), 'utf8');
+    assert.equal(assetDashHtml, rootDashHtml, 'Root dashboard.html must match assets dashboard.html');
+    assert.ok(fs.existsSync(path.join(ROOT, 'app/src/main/assets/vendor/dashboard-compiled.js')), 'assets/vendor/dashboard-compiled.js must exist');
+    assert.ok(fs.existsSync(path.join(ROOT, 'vendor/dashboard-compiled.js')), 'vendor/dashboard-compiled.js must exist');
 });
 
 test('6. Portal server, Kotlin modularization, telemetry isolation, pagination, and worker rating UI are wired', () => {
