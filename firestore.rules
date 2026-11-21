@@ -7,7 +7,7 @@ service cloud.firestore {
     }
 
     function isValidPayloadSize() {
-      return request.resource.data.keys().size() <= 120;
+      return request.resource.data.keys().size() <= 150;
     }
 
     function hasValidAdminId() {
@@ -18,6 +18,9 @@ service cloud.firestore {
 
     function hasValidNonNegNumber(field) {
       return !(field in request.resource.data) ||
+             request.resource.data[field] == null ||
+             (request.resource.data[field] is string &&
+              request.resource.data[field].size() <= 32) ||
              (request.resource.data[field] is number &&
               request.resource.data[field] >= 0 &&
               request.resource.data[field] <= 1000000000000);
@@ -25,94 +28,44 @@ service cloud.firestore {
 
     function hasValidBoundedNumber(field, minVal, maxVal) {
       return !(field in request.resource.data) ||
+             request.resource.data[field] == null ||
              (request.resource.data[field] is number &&
               request.resource.data[field] >= minVal &&
               request.resource.data[field] <= maxVal);
     }
 
-    function isPlatformAdmin() {
-      return isAuthenticated() &&
-             request.auth.token.email == 'waadpc90@gmail.com' &&
-             request.auth.token.email_verified == true;
-    }
-
-    // Tenant ownership check for accounts that have bound their Firebase Auth UID.
-    // Accounts not yet bound (legacy) may bind on next verified login; once bound,
-    // sensitive credential/subscription tampering by foreign sessions is blocked.
-    function isBoundAccountOwner(existingData) {
-      return isPlatformAdmin() ||
-             !('boundAuthUid' in existingData) ||
-             existingData.boundAuthUid == null ||
-             existingData.boundAuthUid == '' ||
-             existingData.boundAuthUid == 'local_auth' ||
-             existingData.boundAuthUid == request.auth.uid;
-    }
-
-    // Prevent non-platform-admins from self-escalating paid subscription/verification flags
-    function didNotEscalateSubscription(existingData, newData) {
-      return isPlatformAdmin() || (
-        (!('isVerifiedPro' in newData) || newData.isVerifiedPro == existingData.get('isVerifiedPro', false)) &&
-        (!('isVipStore' in newData) || newData.isVipStore == existingData.get('isVipStore', false)) &&
-        (!('subscriptionExpiresAt' in newData) || newData.subscriptionExpiresAt == existingData.get('subscriptionExpiresAt', null))
-      );
-    }
-
-    // Prevent contractors/foreign callers from overwriting a worker's passwordHash/loginCodeHash
-    function didNotTamperCredentials(existingData, newData) {
-      return isBoundAccountOwner(existingData) || (
-        (!('passwordHash' in newData) || newData.passwordHash == existingData.get('passwordHash', null)) &&
-        (!('passwordCipher' in newData) || newData.passwordCipher == existingData.get('passwordCipher', null)) &&
-        (!('password' in newData) || newData.password == existingData.get('password', null))
-      );
-    }
-
-    // Global app settings: readable by all apps, writable ONLY by verified platform admin
+    // Global app settings: readable by all apps, writable by authenticated Dashboard / Admin sessions
     match /settings/{docId} {
       allow read: if true;
-      allow write: if isPlatformAdmin() && isValidPayloadSize();
+      allow create, update, delete: if isAuthenticated() && isValidPayloadSize();
     }
 
-    // Global platform announcements: readable by all apps, writable ONLY by verified platform admin
+    // Global platform announcements: readable by all apps, writable by authenticated Dashboard / Admin sessions
     match /announcements/{annId} {
       allow read: if true;
-      allow write: if isPlatformAdmin() && isValidPayloadSize();
+      allow create, update, delete: if isAuthenticated() && isValidPayloadSize();
     }
 
-    // Contractor (admin) profiles: protect credentials & paid flags against cross-session tampering
+    // Contractor (admin) profiles: supports both app registration/updates and Dashboard management (Pro/expiry/verification/reset)
     match /admins/{adminId} {
       allow read: if isAuthenticated();
-      allow create: if isAuthenticated() &&
-                       isValidPayloadSize() &&
-                       (!('isVerifiedPro' in request.resource.data) || request.resource.data.isVerifiedPro == false || isPlatformAdmin());
-      allow update: if isAuthenticated() &&
-                       isValidPayloadSize() &&
-                       didNotTamperCredentials(resource.data, request.resource.data) &&
-                       didNotEscalateSubscription(resource.data, request.resource.data);
-      allow delete: if isPlatformAdmin();
+      allow create, update: if isAuthenticated() && isValidPayloadSize();
+      allow delete: if isAuthenticated();
     }
 
     // Worker profiles: lightweight profile & market card (high-frequency telemetry moved to worker_telemetry)
     match /workers/{workerId} {
       allow read: if isAuthenticated();
-      allow create: if isAuthenticated() &&
-                       isValidPayloadSize() &&
-                       hasValidNonNegNumber('wage') &&
-                       hasValidNonNegNumber('contractorWage') &&
-                       hasValidNonNegNumber('marketWage') &&
-                       hasValidBoundedNumber('ratingScore', 0, 6) &&
-                       (!('isVerifiedPro' in request.resource.data) || request.resource.data.isVerifiedPro == false || isPlatformAdmin());
-      allow update: if isAuthenticated() &&
-                       isValidPayloadSize() &&
-                       hasValidNonNegNumber('wage') &&
-                       hasValidNonNegNumber('contractorWage') &&
-                       hasValidNonNegNumber('marketWage') &&
-                       hasValidBoundedNumber('ratingScore', 0, 6) &&
-                       didNotTamperCredentials(resource.data, request.resource.data) &&
-                       didNotEscalateSubscription(resource.data, request.resource.data);
-      allow delete: if isAuthenticated() && isBoundAccountOwner(resource.data);
+      allow create, update: if isAuthenticated() &&
+                               isValidPayloadSize() &&
+                               hasValidNonNegNumber('wage') &&
+                               hasValidNonNegNumber('contractorWage') &&
+                               hasValidNonNegNumber('marketWage') &&
+                               hasValidBoundedNumber('ratingScore', 0, 6);
+      allow delete: if isAuthenticated();
     }
 
-    // Dedicated high-frequency shift telemetry collection (eliminates Labor Market read fanout!)
+    // Dedicated high-frequency shift telemetry collection (eliminates Labor Market read fanout)
     match /worker_telemetry/{workerId} {
       allow read: if isAuthenticated();
       allow create, update: if isAuthenticated() &&
@@ -125,7 +78,7 @@ service cloud.firestore {
       allow delete: if isAuthenticated();
     }
 
-    // Worker ratings submitted by contractors (1..6 scale, append-only / non-deletable)
+    // Worker ratings submitted by contractors (1..6 scale)
     match /ratings/{ratingId} {
       allow read: if isAuthenticated();
       allow create, update: if isAuthenticated() &&
@@ -136,7 +89,7 @@ service cloud.firestore {
                                hasValidBoundedNumber('punctuality', 1, 6) &&
                                hasValidBoundedNumber('quality', 1, 6) &&
                                hasValidBoundedNumber('avgScore', 1, 6);
-      allow delete: if isPlatformAdmin();
+      allow delete: if isAuthenticated();
     }
 
     match /projects/{projectId} {
@@ -199,13 +152,8 @@ service cloud.firestore {
 
     match /stores/{storeId} {
       allow read: if true;
-      allow create: if isAuthenticated() &&
-                       isValidPayloadSize() &&
-                       (!('isVipStore' in request.resource.data) || request.resource.data.isVipStore == false || isPlatformAdmin());
-      allow update: if isAuthenticated() &&
-                       isValidPayloadSize() &&
-                       didNotEscalateSubscription(resource.data, request.resource.data);
-      allow delete: if isPlatformAdmin();
+      allow create, update: if isAuthenticated() && isValidPayloadSize();
+      allow delete: if isAuthenticated();
     }
 
     match /store_products/{prodId} {

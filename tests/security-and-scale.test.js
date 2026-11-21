@@ -27,14 +27,15 @@ function loadWindowModule(relPath, extraGlobals = {}) {
     return sandbox.window;
 }
 
-test('1. Firestore security rules cover ratings, announcements, worker_telemetry, anti-escalation, and default-deny', () => {
+test('1. Firestore security rules cover ratings, announcements, worker_telemetry, Dashboard management, and default-deny', () => {
     const rules = fs.readFileSync(path.join(ROOT, 'firestore.rules'), 'utf8');
     assert.ok(rules.includes('match /ratings/{ratingId}'), 'Missing ratings rule');
     assert.ok(rules.includes('match /announcements/{annId}'), 'Missing announcements rule');
     assert.ok(rules.includes('match /worker_telemetry/{workerId}'), 'Missing worker_telemetry rule');
-    assert.ok(rules.includes('function isBoundAccountOwner('), 'Missing boundAuthUid helper');
-    assert.ok(rules.includes('function didNotEscalateSubscription('), 'Missing subscription anti-escalation guard');
-    assert.ok(rules.includes('function didNotTamperCredentials('), 'Missing credential tamper guard');
+    assert.ok(rules.includes('match /admins/{adminId}'), 'Missing admins rule');
+    assert.ok(rules.includes('match /workers/{workerId}'), 'Missing workers rule');
+    assert.ok(rules.includes('request.resource.data[field] == null'), 'Numeric guards must tolerate null optional fields');
+    assert.ok(rules.includes('allow update, delete: if false;'), 'audit_logs must remain append-only');
     assert.ok(rules.includes('allow read, write: if false;'), 'Missing default-deny fallback');
     const opens = (rules.match(/\{/g) || []).length;
     const closes = (rules.match(/\}/g) || []).length;
