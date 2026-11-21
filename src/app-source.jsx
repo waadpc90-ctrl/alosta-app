@@ -165,8 +165,8 @@
                         try {
                             const ref = rawDb.collection(op.colName).doc(op.id);
                             if (op.type === 'set') {
-                                if (op.merge) await ref.set(toRawPatch(op.data), { merge: true });
-                                else await ref.set(toRawPatch(op.data));
+                                if (op.merge) await ref.set(toRawPatch(op.data, false), { merge: true });
+                                else await ref.set(toRawPatch(op.data, true));
                             } else if (op.type === 'update') {
                                 await ref.update(toRawPatch(op.data));
                             } else if (op.type === 'delete') {
@@ -215,11 +215,23 @@
 
             const genId = () => 'doc_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8);
 
+            const isDeleteFieldSentinel = (v) => {
+                if (!v || typeof v !== 'object') return false;
+                if (v.__smartOp === 'DELETE_FIELD') return true;
+                if (v.constructor && /DeleteField/i.test(String(v.constructor.name || ''))) return true;
+                try {
+                    if (typeof v.isEqual === 'function' && typeof firebase !== 'undefined' && firebase.firestore && firebase.firestore.FieldValue && typeof firebase.firestore.FieldValue.delete === 'function') {
+                        return v.isEqual(firebase.firestore.FieldValue.delete());
+                    }
+                } catch (e) {}
+                return false;
+            };
+
             const applyChangesToLocal = (existing, patch, merge) => {
                 const base = merge && existing ? { ...existing } : {};
                 Object.keys(patch || {}).forEach(k => {
                     const v = patch[k];
-                    if (v && v.__smartOp === 'DELETE_FIELD') {
+                    if (isDeleteFieldSentinel(v)) {
                         delete base[k];
                     } else if (v && v.__smartOp === 'ARRAY_REMOVE') {
                         const arr = Array.isArray(base[k]) ? base[k] : [];
@@ -231,10 +243,13 @@
                 return base;
             };
 
-            const toRawPatch = (patch) => {
+            const toRawPatch = (patch, stripDeletes = false) => {
                 const out = {};
                 Object.keys(patch || {}).forEach(k => {
                     const v = patch[k];
+                    if (stripDeletes && isDeleteFieldSentinel(v)) {
+                        return;
+                    }
                     if (v && v.__smartOp) {
                         if (v._raw !== undefined) out[k] = v._raw;
                     } else {
@@ -342,7 +357,7 @@
                         persistStore(false, colName);
                         notifyCollection(colName);
                         if (rawDb && cloudAvailable) {
-                            const rawPatch = toRawPatch(data);
+                            const rawPatch = toRawPatch(data, !merge);
                             const p = merge
                                 ? rawDb.collection(colName).doc(id).set(rawPatch, { merge: true })
                                 : rawDb.collection(colName).doc(id).set(rawPatch);
@@ -520,7 +535,7 @@
                             persistStore(false, colName);
                             notifyCollection(colName);
                             if (rawDb && cloudAvailable) {
-                                rawDb.collection(colName).doc(id).set(toRawPatch(data)).then(() => {
+                                rawDb.collection(colName).doc(id).set(toRawPatch(data, true)).then(() => {
                                     if (window.AlOstaIndexedVault && pendingCloudOps.length === 0) {
                                         window.AlOstaIndexedVault.updateSyncStatus({ status: 'synced' });
                                     }
@@ -583,8 +598,8 @@
                                             if (op.type === 'update') fbBatch.update(rawRef, toRawPatch(op.data));
                                             else if (op.type === 'set') {
                                                 const merge = Boolean(op.setOpts && op.setOpts.merge);
-                                                if (merge) fbBatch.set(rawRef, toRawPatch(op.data), { merge: true });
-                                                else fbBatch.set(rawRef, toRawPatch(op.data));
+                                                if (merge) fbBatch.set(rawRef, toRawPatch(op.data, false), { merge: true });
+                                                else fbBatch.set(rawRef, toRawPatch(op.data, true));
                                             } else if (op.type === 'delete') fbBatch.delete(rawRef);
                                         }
                                         await fbBatch.commit();
@@ -828,18 +843,22 @@
                 return bytesToUtf8(plainBytes);
             };
 
-            const buildProtectedCredentials = (rawPassword, saltContext = '') => {
+            const buildProtectedCredentials = (rawPassword, saltContext = '', forUpdate = false) => {
                 const clean = String(rawPassword || '').trim();
-                const delOp = (typeof firebase !== 'undefined' && firebase.firestore && firebase.firestore.FieldValue && firebase.firestore.FieldValue.delete)
-                    ? firebase.firestore.FieldValue.delete()
-                    : '';
-                return {
+                const creds = {
                     passwordHash: hashPasswordV3(clean),
-                    passwordCipher: delOp,
                     password: ENCRYPTED_MASK,
                     securityVersion: 3,
                     securityUpdatedAt: new Date().toISOString()
                 };
+                if (forUpdate) {
+                    if (typeof firebase !== 'undefined' && firebase.firestore && firebase.firestore.FieldValue && firebase.firestore.FieldValue.delete) {
+                        creds.passwordCipher = firebase.firestore.FieldValue.delete();
+                    } else {
+                        creds.passwordCipher = '';
+                    }
+                }
+                return creds;
             };
 
             const verifyPassword = (inputPassword, docData, saltContext = '') => {
@@ -1586,7 +1605,19 @@
             'rotate-ccw': <><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></>,
             'store': <><path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/><path d="M2 7h20"/><path d="M22 7v3a2 2 0 0 1-2 2v0a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 16 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 12 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 8 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 4 12v0a2 2 0 0 1-2-2V7"/></>,
             'navigation': <polygon points="3 11 22 2 13 21 11 13 3 11"/>,
-            'clipboard-list': <><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></>
+            'clipboard-list': <><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></>,
+            'shield': <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>,
+            'shield-check': <><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></>,
+            'shield-alert': <><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></>,
+            'refresh-cw': <><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></>,
+            'eye-off': <><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></>,
+            'settings': <><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></>,
+            'banknote': <><rect width="20" height="12" x="2" y="6" rx="2"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/></>,
+            'edit-2': <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>,
+            'external-link': <><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" x2="21" y1="14" y2="3"/></>,
+            'tool': <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>,
+            'user-check': <><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/></>,
+            'alert-triangle': <><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></>
         };
 
         const haptic = () => {
@@ -4536,7 +4567,7 @@
                         addToast(lang === 'ar' ? '⛔ رقم الهاتف هذا مسجل مسبقاً لحساب مقاول آخر!' : '⛔ Phone already registered to another contractor');
                         return;
                     }
-                    const credUpdates = pwdVal ? AlOstaCrypto.buildProtectedCredentials(pwdVal, adminId) : {};
+                    const credUpdates = pwdVal ? AlOstaCrypto.buildProtectedCredentials(pwdVal, adminId, true) : {};
                     const updates = {
                         fullName: nameCheck.clean,
                         phone: phoneCheck.clean,
@@ -11922,7 +11953,7 @@
                                     const govVal = f.gv.value || 'بغداد';
                                     const marketWageVal = parseMoney(normalizeDigits(f.mw?.value || '')) || w || 25000;
                                     try {
-                                        const protectedCreds = AlOstaCrypto.buildProtectedCredentials(pwd, cleanPhone);
+                                        const protectedCreds = AlOstaCrypto.buildProtectedCredentials(pwd, cleanPhone, true);
                                         const updatedFields = {
                                             name: fullName,
                                             phone: cleanPhone,
@@ -12617,7 +12648,7 @@
                                 }
                             }
                             const marketWageVal = parseMoney(normalizeDigits(d.wage)) || pendingCodeWorker.wage || 25000;
-                            const protectedCreds = AlOstaCrypto.buildProtectedCredentials(d.p, cleanPhone);
+                            const protectedCreds = AlOstaCrypto.buildProtectedCredentials(d.p, cleanPhone, true);
                             const updateFields = {
                                 name: nameCheck.clean,
                                 phone: cleanPhone,
@@ -12679,7 +12710,7 @@
                             const unactivatedDoc = existing.docs.find(doc => !isWorkerProfileRegistered(doc.data()));
                             if (!existing.empty && !unactivatedDoc) throw new Error(tr('errExists'));
                             const generatedCode = unactivatedDoc ? (unactivatedDoc.data().loginCode || generateStrongCode()) : generateStrongCode();
-                            const protectedCreds = AlOstaCrypto.buildProtectedCredentials(d.p, cleanPhone);
+                            const protectedCreds = AlOstaCrypto.buildProtectedCredentials(d.p, cleanPhone, Boolean(unactivatedDoc));
                             const marketWageVal = parseMoney(normalizeDigits(d.wage)) || 25000;
                             if (unactivatedDoc) {
                                 const prevData = unactivatedDoc.data();
@@ -12760,7 +12791,7 @@
                                     throw new Error(tr('errLogin'));
                                 }
                                 if (shouldUpgrade) {
-                                    const upgraded = AlOstaCrypto.buildProtectedCredentials(d.p, cleanPhone);
+                                    const upgraded = AlOstaCrypto.buildProtectedCredentials(d.p, cleanPhone, true);
                                     db.collection('workers').doc(matchedDoc.id).update(upgraded).catch(() => {});
                                     matchedDoc = { ...matchedDoc, ...upgraded };
                                 }
@@ -12841,7 +12872,7 @@
                             const check = AlOstaCrypto.verifyPassword(d.p, adminData, targetAdminId);
                             if (check.valid) {
                                 if (check.needsUpgrade) {
-                                    const upgraded = AlOstaCrypto.buildProtectedCredentials(d.p, targetAdminId);
+                                    const upgraded = AlOstaCrypto.buildProtectedCredentials(d.p, targetAdminId, true);
                                     db.collection('admins').doc(targetAdminId).update(upgraded).catch(() => {});
                                 }
                                 localStorage.setItem('alosta_last_u', targetAdminId);

@@ -152,8 +152,16 @@ test('4. AlOstaCrypto v3 produces unique random-salted hashes, verifies correctl
     assert.ok(startIdx > 0 && endIdx > startIdx, 'Could not locate AlOstaCrypto block');
     const cryptoCode = src.slice(startIdx, endIdx) + '\nwindow.AlOstaCrypto = AlOstaCrypto;';
 
+    const DELETE_SENTINEL = { _methodName: 'FieldValue.delete' };
     const sandbox = {
         window: {},
+        firebase: {
+            firestore: {
+                FieldValue: {
+                    delete: () => DELETE_SENTINEL
+                }
+            }
+        },
         localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
         TextEncoder,
         Uint8Array,
@@ -175,11 +183,13 @@ test('4. AlOstaCrypto v3 produces unique random-salted hashes, verifies correctl
 
     const cred1 = C.buildProtectedCredentials('MySecret123!', '07701234567');
     const cred2 = C.buildProtectedCredentials('MySecret123!', '07701234567');
+    const credUpgrade = C.buildProtectedCredentials('MySecret123!', '07701234567', true);
 
     assert.equal(cred1.securityVersion, 3);
     assert.ok(cred1.passwordHash.startsWith('v3$pbkdf2-sha256$'), `Expected v3 hash prefix, got: ${cred1.passwordHash}`);
     assert.notEqual(cred1.passwordHash, cred2.passwordHash, 'Two hashes of the same password MUST use distinct random salts');
-    assert.equal(cred1.passwordCipher, '', 'Reversible passwordCipher must not be stored on new v3 credentials');
+    assert.equal('passwordCipher' in cred1, false, 'New account credentials MUST NOT include passwordCipher or FieldValue.delete() for non-merge set()');
+    assert.equal(credUpgrade.passwordCipher, DELETE_SENTINEL, 'Update/upgrade credentials MUST scrub legacy passwordCipher via FieldValue.delete()');
 
     // Verify valid v3 login needs NO upgrade
     const v3Ok = C.verifyPassword('MySecret123!', cred1, '07701234567');
