@@ -3,6 +3,7 @@ package com.example
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -10,14 +11,25 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
 import android.widget.Toast
+import java.io.BufferedInputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import java.util.Locale
+import java.util.zip.ZipFile
 
 object AlOstaApkUpdater {
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+    private const val MIN_VALID_APK_BYTES = 50_000L
+    private const val MAX_ALLOWED_APK_BYTES = 150L * 1024L * 1024L
+
     @Volatile
     private var isDownloading = false
     @Volatile
-    private var lastDownloadedApk: java.io.File? = null
+    private var lastDownloadedApk: File? = null
     @Volatile
     private var pendingInstallOnResume = false
     @Volatile
@@ -39,6 +51,21 @@ object AlOstaApkUpdater {
         } catch (_: Exception) {
             0L
         }
+    }
+
+    fun sanitizeInputUrl(rawUrl: String): String {
+        val clean = rawUrl.trim()
+        if (clean.isEmpty()) return ""
+        val withProtocol = if (clean.startsWith("http://", ignoreCase = true) ||
+            clean.startsWith("https://", ignoreCase = true)
+        ) {
+            clean
+        } else if (clean.contains(".") && !clean.contains("://")) {
+            "https://$clean"
+        } else {
+            clean
+        }
+        return withProtocol.replace(" ", "%20")
     }
 
     fun extractGoogleDriveFileId(rawUrl: String): String? {
@@ -63,16 +90,134 @@ object AlOstaApkUpdater {
         return null
     }
 
-    fun toDirectDownloadUrl(rawUrl: String): String {
+    /**
+     * Converts GitHub /blob/ or /raw/ URLs into direct raw.githubusercontent.com URLs
+     * to avoid HTML preview pages and extra redirect hops.
+     */
+    fun toGitHubRawUrl(rawUrl: String): String? {
         val clean = rawUrl.trim()
+        val match = Regex(
+            """^https?://(?:www\.)?github\.com/([^/\s]+)/([^/\s]+)/(?:blob|raw)/([^/\s]+)/(.+)$""",
+            RegexOption.IGNORE_CASE
+        ).find(clean) ?: return null
+        val owner = match.groupValues[1]
+        val repo = match.groupValues[2]
+        val ref = match.groupValues[3]
+        val path = match.groupValues[4].substringBefore("?").substringBefore("#")
+        return "https://raw.githubusercontent.com/$owner/$repo/$ref/$path"
+    }
+
+    /**
+     * Converts raw.githubusercontent.com URL to GitHub LFS media download URL when a file
+     * is stored in Git LFS (pointer text response).
+     */
+    fun toGitHubLfsMediaUrl(rawUrl: String): String? {
+        val clean = rawUrl.trim()
+        val rawMatch = Regex(
+            """^https?://raw\.githubusercontent\.com/([^/\s]+)/([^/\s]+)/([^/\s]+)/(.+)$""",
+            RegexOption.IGNORE_CASE
+        ).find(clean)
+        if (rawMatch != null) {
+            val owner = rawMatch.groupValues[1]
+            val repo = rawMatch.groupValues[2]
+            val ref = rawMatch.groupValues[3]
+            val path = rawMatch.groupValues[4].substringBefore("?").substringBefore("#")
+            return "https://media.githubusercontent.com/media/$owner/$repo/$ref/$path"
+        }
+        val ghMatch = Regex(
+            """^https?://(?:www\.)?github\.com/([^/\s]+)/([^/\s]+)/(?:blob|raw)/([^/\s]+)/(.+)$""",
+            RegexOption.IGNORE_CASE
+        ).find(clean)
+        if (ghMatch != null) {
+            val owner = ghMatch.groupValues[1]
+            val repo = ghMatch.groupValues[2]
+            val ref = ghMatch.groupValues[3]
+            val path = ghMatch.groupValues[4].substringBefore("?").substringBefore("#")
+            return "https://media.githubusercontent.com/media/$owner/$repo/$ref/$path"
+        }
+        return null
+    }
+
+    fun toDirectDownloadUrl(rawUrl: String): String {
+        val clean = sanitizeInputUrl(rawUrl)
+        if (clean.isEmpty()) return ""
+
         val gdriveId = extractGoogleDriveFileId(clean)
         if (!gdriveId.isNullOrBlank()) {
-            return "https://drive.usercontent.google.com/download?id=$gdriveId&export=download&confirm=t&authuser=0"
+            // Avoid authuser=0 which causes 404 / "File missing" on multi-account phones
+            return "https://drive.usercontent.google.com/download?id=$gdriveId&export=download&confirm=t"
         }
+
+        val ghRaw = toGitHubRawUrl(clean)
+        if (!ghRaw.isNullOrBlank()) {
+            return ghRaw
+        }
+
         if (clean.contains("dropbox.com", ignoreCase = true)) {
-            return clean.replace("?dl=0", "?dl=1").replace("&dl=0", "&dl=1")
+            return when {
+                clean.contains("dl=0", ignoreCase = true) ->
+                    clean.replace(Regex("""([?&])dl=0\b""", RegexOption.IGNORE_CASE), "$1dl=1")
+                clean.contains("dl=1", ignoreCase = true) -> clean
+                clean.contains("?") -> "$clean&dl=1"
+                else -> "$clean?dl=1"
+            }
         }
         return clean
+    }
+
+    fun toBrowserFriendlyUrl(rawUrl: String): String {
+        val clean = sanitizeInputUrl(rawUrl)
+        if (clean.isEmpty()) return ""
+        val gdriveId = extractGoogleDriveFileId(clean)
+        if (!gdriveId.isNullOrBlank()) {
+            return "https://drive.google.com/uc?export=download&id=$gdriveId"
+        }
+        val ghRaw = toGitHubRawUrl(clean)
+        if (!ghRaw.isNullOrBlank()) {
+            return ghRaw
+        }
+        return toDirectDownloadUrl(clean)
+    }
+
+    fun parseMediaFireDownloadUrl(html: String): String? {
+        val idFirst = Regex(
+            """<a[^>]*id=["']downloadButton["'][^>]*href=["'](https?://[^"']+)["']""",
+            RegexOption.IGNORE_CASE
+        ).find(html)
+        if (idFirst != null) {
+            return idFirst.groupValues[1].replace("&amp;", "&")
+        }
+        val hrefFirst = Regex(
+            """<a[^>]*href=["'](https?://[^"']+)["'][^>]*id=["']downloadButton["']""",
+            RegexOption.IGNORE_CASE
+        ).find(html)
+        if (hrefFirst != null) {
+            return hrefFirst.groupValues[1].replace("&amp;", "&")
+        }
+        val directMf = Regex(
+            """https?://download\d*\.mediafire\.com/[^"'\s<>]+""",
+            RegexOption.IGNORE_CASE
+        ).find(html)
+        return directMf?.value?.replace("&amp;", "&")
+    }
+
+    fun parseHtmlDirectApkLink(html: String, baseUrl: String): String? {
+        val mf = parseMediaFireDownloadUrl(html)
+        if (!mf.isNullOrBlank()) return mf
+
+        // Detect direct .apk href inside landing pages (e.g., download.html)
+        val apkHrefRegex = Regex(
+            """href=["']([^"']*AlOsta_App\.apk[^"']*|[^"']+\.apk(?:\?[^"']*)?)["']""",
+            RegexOption.IGNORE_CASE
+        )
+        val match = apkHrefRegex.find(html) ?: return null
+        val candidate = match.groupValues[1].replace("&amp;", "&").trim()
+        if (candidate.isEmpty()) return null
+        return try {
+            URL(URL(baseUrl), candidate).toString()
+        } catch (_: Exception) {
+            null
+        }
     }
 
     fun notifyWebView(
@@ -101,18 +246,15 @@ object AlOstaApkUpdater {
             if (nowUpdateTime > baselineLastUpdateTime) {
                 baselineLastUpdateTime = 0L
                 pendingInstallOnResume = false
-                try {
-                    lastDownloadedApk?.delete()
-                } catch (_: Exception) {
-                }
+                cleanupUpdateDir(context, keepFile = null)
                 lastDownloadedApk = null
                 notifyWebView(lastWebViewRef, "installed", 100, "تم تثبيت التحديث بنجاح! ✓")
                 return
             }
         }
         if (pendingInstallOnResume) {
-            val apk = lastDownloadedApk
-            if (apk != null && apk.exists() && apk.length() > 50_000L) {
+            val apk = lastDownloadedApk ?: findLatestValidCachedApk(context)
+            if (apk != null && apk.exists() && apk.length() >= MIN_VALID_APK_BYTES) {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || context.packageManager.canRequestPackageInstalls()) {
                     pendingInstallOnResume = false
                     launchPackageInstaller(context, apk, lastWebViewRef)
@@ -121,15 +263,31 @@ object AlOstaApkUpdater {
         }
     }
 
+    fun isValidApkArchive(file: File): Boolean {
+        if (!file.exists() || !file.isFile || file.length() < MIN_VALID_APK_BYTES) return false
+        return try {
+            ZipFile(file).use { zip ->
+                zip.getEntry("AndroidManifest.xml") != null
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun launchPackageInstaller(
         context: Context,
-        apkFile: java.io.File? = lastDownloadedApk,
+        apkFile: File? = lastDownloadedApk,
         webViewProvider: (() -> WebView?)? = lastWebViewRef
     ): Boolean {
-        val target = apkFile ?: getTargetApkFile(context)
-        if (!target.exists() || target.length() < 50_000L) {
+        val target = apkFile?.takeIf { it.exists() && it.length() >= MIN_VALID_APK_BYTES }
+            ?: findLatestValidCachedApk(context)
+            ?: return false
+
+        if (!target.exists() || target.length() < MIN_VALID_APK_BYTES || !isValidApkArchive(target)) {
+            lastDownloadedApk = null
             return false
         }
+
         lastDownloadedApk = target
         lastWebViewRef = webViewProvider
         if (baselineLastUpdateTime == 0L) {
@@ -162,6 +320,16 @@ object AlOstaApkUpdater {
                 }
 
                 pendingInstallOnResume = false
+                if (!target.exists() || target.length() < MIN_VALID_APK_BYTES) {
+                    notifyWebView(
+                        webViewProvider,
+                        "error",
+                        0,
+                        "تعذر العثور على ملف التحديث المحمّل — اضغط إعادة التحميل للمحاولة مرة أخرى."
+                    )
+                    return@post
+                }
+
                 val apkUri = androidx.core.content.FileProvider.getUriForFile(
                     context,
                     "${context.packageName}.fileprovider",
@@ -175,6 +343,8 @@ object AlOstaApkUpdater {
                             Intent.FLAG_ACTIVITY_NEW_TASK
                     )
                 }
+                grantReadPermissionToInstallers(context, installIntent, apkUri)
+
                 notifyWebView(
                     webViewProvider,
                     "installing",
@@ -195,6 +365,7 @@ object AlOstaApkUpdater {
                                 Intent.FLAG_ACTIVITY_NEW_TASK
                         )
                     }
+                    grantReadPermissionToInstallers(context, fallbackIntent, apkUri)
                     context.startActivity(fallbackIntent)
                 }
             } catch (e: Exception) {
@@ -210,11 +381,102 @@ object AlOstaApkUpdater {
         return true
     }
 
-    private fun getTargetApkFile(context: Context): java.io.File {
-        val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.cacheDir
-        val updateDir = java.io.File(baseDir, "apk_updates")
-        if (!updateDir.exists()) updateDir.mkdirs()
-        return java.io.File(updateDir, "AlOsta_Update.apk")
+    private fun grantReadPermissionToInstallers(context: Context, intent: Intent, uri: Uri) {
+        try {
+            val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.packageManager.queryIntentActivities(
+                    intent,
+                    PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_DEFAULT_ONLY.toLong())
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            }
+            for (info in resolved) {
+                val pkg = info.activityInfo?.packageName ?: continue
+                try {
+                    context.grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (_: Exception) {
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Uses internal cacheDir (ext4/f2fs) instead of external FUSE storage so OEM package
+     * installers (Xiaomi MIUI/HyperOS, Samsung OneUI, Huawei) never hit "File missing".
+     */
+    private fun getUpdateDir(context: Context): File {
+        val dir = File(context.cacheDir, "apk_updates")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    private fun cleanupUpdateDir(context: Context, keepFile: File?) {
+        try {
+            val dir = getUpdateDir(context)
+            dir.listFiles()?.forEach { f ->
+                if (keepFile == null || f.absolutePath != keepFile.absolutePath) {
+                    f.delete()
+                }
+            }
+            // Also clean legacy external dir if present
+            val legacyBase = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            if (legacyBase != null) {
+                File(legacyBase, "apk_updates").listFiles()?.forEach { it.delete() }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun findLatestValidCachedApk(context: Context): File? {
+        return try {
+            getUpdateDir(context).listFiles()
+                ?.filter { it.isFile && it.name.endsWith(".apk", ignoreCase = true) && it.length() >= MIN_VALID_APK_BYTES }
+                ?.maxByOrNull { it.lastModified() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun moveFileSafely(src: File, dst: File): Boolean {
+        if (!src.exists() || src.length() < MIN_VALID_APK_BYTES) return false
+        if (src.absolutePath == dst.absolutePath) return true
+        if (dst.exists()) dst.delete()
+        if (src.renameTo(dst) && dst.exists() && dst.length() >= MIN_VALID_APK_BYTES) {
+            return true
+        }
+        return try {
+            src.copyTo(dst, overwrite = true)
+            if (dst.exists() && dst.length() >= MIN_VALID_APK_BYTES) {
+                src.delete()
+                true
+            } else {
+                false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun readExactBytes(input: BufferedInputStream, count: Int): ByteArray {
+        val buf = ByteArray(count)
+        var offset = 0
+        while (offset < count) {
+            val r = input.read(buf, offset, count - offset)
+            if (r <= 0) break
+            offset += r
+        }
+        return if (offset == count) buf else buf.copyOf(offset)
+    }
+
+    private fun hasZipMagic(header: ByteArray): Boolean {
+        return header.size >= 4 &&
+            header[0] == 0x50.toByte() &&
+            header[1] == 0x4B.toByte() &&
+            header[2] == 0x03.toByte() &&
+            header[3] == 0x04.toByte()
     }
 
     private fun parseGoogleDriveConfirmationUrl(html: String, fallbackFileId: String?): String? {
@@ -245,7 +507,7 @@ object AlOstaApkUpdater {
             if (!params.containsKey("export")) params["export"] = "download"
             if (!params.containsKey("confirm")) params["confirm"] = "t"
             val query = params.entries.joinToString("&") { (k, v) ->
-                "${java.net.URLEncoder.encode(k, "UTF-8")}=${java.net.URLEncoder.encode(v, "UTF-8")}"
+                "${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}"
             }
             return if (actionUrl.contains("?")) "$actionUrl&$query" else "$actionUrl?$query"
         }
@@ -258,17 +520,37 @@ object AlOstaApkUpdater {
         return null
     }
 
+    private fun cookieScopeForHost(host: String): String {
+        val lower = host.lowercase(Locale.ROOT)
+        return when {
+            lower.endsWith("google.com") || lower.endsWith("googleusercontent.com") -> "google"
+            lower.endsWith("mediafire.com") -> "mediafire"
+            lower.endsWith("dropbox.com") || lower.endsWith("dropboxusercontent.com") -> "dropbox"
+            else -> lower
+        }
+    }
+
+    private data class ConnectionResult(
+        val connection: HttpURLConnection,
+        val finalUrl: String,
+        val statusCode: Int
+    )
+
     private fun openConnectionFollowingRedirects(
         startUrl: String,
-        cookieJar: MutableMap<String, String>
-    ): java.net.HttpURLConnection {
-        var currentUrl = startUrl
+        scopedCookies: MutableMap<String, MutableMap<String, String>>
+    ): ConnectionResult {
+        var currentUrl = sanitizeInputUrl(startUrl)
         var hops = 0
-        while (hops < 10) {
+        while (hops < 12) {
             if (!AlOstaSecurityVault.isSafeExternalHttpUrl(currentUrl)) {
                 throw SecurityException("Blocked unsafe redirect URL: $currentUrl")
             }
-            val conn = (java.net.URL(currentUrl).openConnection() as java.net.HttpURLConnection).apply {
+            val parsedUrl = URL(currentUrl)
+            val scope = cookieScopeForHost(parsedUrl.host ?: "")
+            val jar = scopedCookies.getOrPut(scope) { mutableMapOf() }
+
+            val conn = (parsedUrl.openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = false
                 connectTimeout = 15000
                 readTimeout = 30000
@@ -277,10 +559,10 @@ object AlOstaApkUpdater {
                     "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
                 )
                 setRequestProperty("Accept", "*/*")
-                if (cookieJar.isNotEmpty()) {
+                if (jar.isNotEmpty()) {
                     setRequestProperty(
                         "Cookie",
-                        cookieJar.entries.joinToString("; ") { "${it.key}=${it.value}" }
+                        jar.entries.joinToString("; ") { "${it.key}=${it.value}" }
                     )
                 }
             }
@@ -289,13 +571,13 @@ object AlOstaApkUpdater {
             setCookies?.forEach { header ->
                 val pair = header.substringBefore(";").split("=", limit = 2)
                 if (pair.size == 2) {
-                    cookieJar[pair[0].trim()] = pair[1].trim()
+                    jar[pair[0].trim()] = pair[1].trim()
                 }
             }
             if (code in 300..399) {
-                val loc = conn.getHeaderField("Location") ?: break
+                val loc = conn.getHeaderField("Location") ?: return ConnectionResult(conn, currentUrl, code)
                 val nextUrl = try {
-                    java.net.URL(java.net.URL(currentUrl), loc).toString()
+                    URL(parsedUrl, loc).toString()
                 } catch (_: Exception) {
                     loc
                 }
@@ -303,14 +585,15 @@ object AlOstaApkUpdater {
                 currentUrl = nextUrl
                 hops++
             } else {
-                return conn
+                return ConnectionResult(conn, currentUrl, code)
             }
         }
-        return (java.net.URL(currentUrl).openConnection() as java.net.HttpURLConnection).apply {
+        val finalConn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
             connectTimeout = 15000
             readTimeout = 30000
         }
+        return ConnectionResult(finalConn, currentUrl, finalConn.responseCode)
     }
 
     fun startSmartUpdate(
@@ -319,8 +602,16 @@ object AlOstaApkUpdater {
         webViewProvider: () -> WebView?
     ) {
         lastWebViewRef = webViewProvider
-        val cleanUrl = rawUrl.trim()
-        if (cleanUrl.isEmpty()) return
+        val cleanUrl = sanitizeInputUrl(rawUrl)
+        if (cleanUrl.isEmpty() || !AlOstaSecurityVault.isSafeExternalHttpUrl(cleanUrl)) {
+            notifyWebView(
+                webViewProvider,
+                "error",
+                0,
+                "⚠️ رابط التحديث غير صالح — يرجى التأكد من الرابط في لوحة التحكم."
+            )
+            return
+        }
 
         if (isDownloading) {
             notifyWebView(webViewProvider, "downloading", 50, "جاري تحميل التحديث بالفعل...")
@@ -334,100 +625,159 @@ object AlOstaApkUpdater {
         notifyWebView(webViewProvider, "downloading", 5, "جاري الاتصال وتجهيز ملف التحديث...")
 
         Thread {
-            val cookieJar = mutableMapOf<String, String>()
-            val targetApk = getTargetApkFile(context)
-            val tempApk = java.io.File(targetApk.parentFile, "AlOsta_Update.apk.tmp")
+            val scopedCookies = mutableMapOf<String, MutableMap<String, String>>()
+            val updateDir = getUpdateDir(context)
+            val stamp = System.currentTimeMillis()
+            val targetApk = File(updateDir, "AlOsta_Update_$stamp.apk")
+            val tempApk = File(updateDir, "AlOsta_Update_$stamp.apk.tmp")
+
+            var activeConn: HttpURLConnection? = null
+            var activeInput: BufferedInputStream? = null
 
             try {
-                var conn = openConnectionFollowingRedirects(initialUrl, cookieJar)
-                var input = java.io.BufferedInputStream(conn.inputStream)
-                input.mark(8192)
-                val headerBytes = ByteArray(4)
-                var headerRead = 0
-                while (headerRead < 4) {
-                    val r = input.read(headerBytes, headerRead, 4 - headerRead)
-                    if (r <= 0) break
-                    headerRead += r
+                cleanupUpdateDir(context, keepFile = null)
+
+                var result = openConnectionFollowingRedirects(initialUrl, scopedCookies)
+                activeConn = result.connection
+
+                // If raw.githubusercontent.com returned 404, try original URL once as fallback
+                if (result.statusCode == 404 && initialUrl != cleanUrl) {
+                    activeConn.disconnect()
+                    result = openConnectionFollowingRedirects(cleanUrl, scopedCookies)
+                    activeConn = result.connection
                 }
-                val isZipMagic = headerRead == 4 &&
-                    headerBytes[0] == 0x50.toByte() &&
-                    headerBytes[1] == 0x4B.toByte() &&
-                    headerBytes[2] == 0x03.toByte() &&
-                    headerBytes[3] == 0x04.toByte()
 
-                if (!isZipMagic) {
-                    input.reset()
-                    val htmlBytes = ByteArray(262144)
-                    var totalHtml = 0
-                    while (totalHtml < htmlBytes.size) {
-                        val r = input.read(htmlBytes, totalHtml, htmlBytes.size - totalHtml)
+                if (result.statusCode == 404 || result.statusCode == 410) {
+                    activeConn.disconnect()
+                    isDownloading = false
+                    notifyWebView(
+                        webViewProvider,
+                        "error",
+                        0,
+                        "⚠️ ملف التحديث غير موجود على هذا الرابط (خطأ ${result.statusCode}). تأكد من رفع AlOsta_App.apk وتحديث الرابط في لوحة التحكم."
+                    )
+                    return@Thread
+                }
+                if (result.statusCode == 401 || result.statusCode == 403) {
+                    activeConn.disconnect()
+                    isDownloading = false
+                    notifyWebView(
+                        webViewProvider,
+                        "error",
+                        0,
+                        "⚠️ الرابط محمي ولا يسمح بالتحميل المباشر (خطأ ${result.statusCode}). تأكد أن الملف عام (Public / Anyone with the link)."
+                    )
+                    return@Thread
+                }
+                if (result.statusCode >= 400) {
+                    activeConn.disconnect()
+                    isDownloading = false
+                    notifyWebView(
+                        webViewProvider,
+                        "error",
+                        0,
+                        "⚠️ تعذر تنزيل التحديث من الخادم (رمز الخطأ ${result.statusCode}). جرب فتح الرابط في المتصفح."
+                    )
+                    return@Thread
+                }
+
+                activeInput = BufferedInputStream(activeConn.inputStream)
+                activeInput.mark(16384)
+                val firstHeader = readExactBytes(activeInput, 4)
+
+                if (!hasZipMagic(firstHeader)) {
+                    activeInput.reset()
+                    val snippetBytes = ByteArray(262144)
+                    var totalSnippet = 0
+                    while (totalSnippet < snippetBytes.size) {
+                        val r = activeInput.read(snippetBytes, totalSnippet, snippetBytes.size - totalSnippet)
                         if (r <= 0) break
-                        totalHtml += r
+                        totalSnippet += r
                     }
-                    input.close()
-                    conn.disconnect()
+                    activeInput.close()
+                    activeConn.disconnect()
+                    activeInput = null
+                    activeConn = null
 
-                    val htmlText = String(htmlBytes, 0, totalHtml, Charsets.UTF_8)
-                    val confirmedUrl = parseGoogleDriveConfirmationUrl(htmlText, gdriveFileId)
-                        ?: if (!gdriveFileId.isNullOrBlank()) {
-                            "https://drive.google.com/uc?export=download&id=$gdriveFileId&confirm=t"
-                        } else {
-                            null
-                        }
+                    val textResponse = String(snippetBytes, 0, totalSnippet, Charsets.UTF_8)
 
-                    if (confirmedUrl != null) {
-                        notifyWebView(webViewProvider, "downloading", 12, "تم تخطي فحص كوكل درايف، جاري تنزيل الحزمة...")
-                        conn = openConnectionFollowingRedirects(confirmedUrl, cookieJar)
-                        input = java.io.BufferedInputStream(conn.inputStream)
-                        input.mark(8192)
-                        val secondHeader = ByteArray(4)
-                        val secondRead = input.read(secondHeader)
-                        val secondIsZip = secondRead == 4 &&
-                            secondHeader[0] == 0x50.toByte() &&
-                            secondHeader[1] == 0x4B.toByte() &&
-                            secondHeader[2] == 0x03.toByte() &&
-                            secondHeader[3] == 0x04.toByte()
+                    // 1) Detect Git LFS pointer file -> automatically switch to media.githubusercontent.com
+                    val followUpUrl = if (textResponse.startsWith("version https://git-lfs.github.com/spec/v1")) {
+                        toGitHubLfsMediaUrl(result.finalUrl) ?: toGitHubLfsMediaUrl(cleanUrl)
+                    } else if (!gdriveFileId.isNullOrBlank()) {
+                        // 2) Google Drive virus-scan / confirmation HTML
+                        parseGoogleDriveConfirmationUrl(textResponse, gdriveFileId)
+                            ?: "https://drive.google.com/uc?export=download&id=$gdriveFileId&confirm=t"
+                    } else {
+                        // 3) MediaFire or HTML landing page (e.g. download.html) with direct .apk link
+                        parseHtmlDirectApkLink(textResponse, result.finalUrl)
+                    }
 
-                        if (!secondIsZip) {
-                            input.close()
-                            conn.disconnect()
+                    if (followUpUrl != null && AlOstaSecurityVault.isSafeExternalHttpUrl(followUpUrl)) {
+                        notifyWebView(webViewProvider, "downloading", 12, "جاري متابعة الرابط المباشر وتنزيل الحزمة...")
+                        val secondRes = openConnectionFollowingRedirects(followUpUrl, scopedCookies)
+                        activeConn = secondRes.connection
+
+                        if (secondRes.statusCode >= 400) {
+                            activeConn.disconnect()
                             isDownloading = false
                             notifyWebView(
                                 webViewProvider,
-                                "external",
-                                100,
-                                "الرابط يتطلب فتح المتصفح أو تطبيق الدرايف للتنزيل المباشر"
+                                "error",
+                                0,
+                                "⚠️ تعذر العثور على ملف التحديث (خطأ ${secondRes.statusCode}). تأكد من صلاحية الرابط في لوحة التحكم."
                             )
-                            openInExternalBrowser(context, confirmedUrl)
                             return@Thread
                         }
-                        input.reset()
+
+                        activeInput = BufferedInputStream(activeConn.inputStream)
+                        activeInput.mark(16384)
+                        val secondHeader = readExactBytes(activeInput, 4)
+
+                        if (!hasZipMagic(secondHeader)) {
+                            activeInput.close()
+                            activeConn.disconnect()
+                            isDownloading = false
+                            notifyWebView(
+                                webViewProvider,
+                                "error",
+                                0,
+                                "⚠️ الرابط لا يؤدي مباشرة إلى ملف APK (قد يتطلب تسجيل دخول أو صلاحية عامة). اضغط زر فتح الرابط في المتصفح."
+                            )
+                            return@Thread
+                        }
+                        activeInput.reset()
                     } else {
                         isDownloading = false
                         notifyWebView(
                             webViewProvider,
-                            "external",
-                            100,
-                            "تم تحويلك للمتصفح لإكمال تنزيل التحديث"
+                            "error",
+                            0,
+                            "⚠️ الرابط يفتح صفحة ويب وليس ملف APK مباشر. تأكد من الرابط أو اضغط فتح الرابط في المتصفح."
                         )
-                        openInExternalBrowser(context, initialUrl)
                         return@Thread
                     }
                 } else {
-                    input.reset()
+                    activeInput.reset()
                 }
+
+                val conn = activeConn ?: throw IllegalStateException("Missing HTTP connection")
+                val input = activeInput ?: throw IllegalStateException("Missing input stream")
 
                 val contentLength = conn.contentLengthLong
                 var downloadedBytes = 0L
                 val buffer = ByteArray(32768)
                 var lastReportedPct = 10
 
-                java.io.FileOutputStream(tempApk).use { out ->
+                FileOutputStream(tempApk).use { out ->
                     while (true) {
                         val read = input.read(buffer)
                         if (read <= 0) break
-                        out.write(buffer, 0, read)
                         downloadedBytes += read
+                        if (downloadedBytes > MAX_ALLOWED_APK_BYTES) {
+                            throw SecurityException("Update file exceeds safe maximum size")
+                        }
+                        out.write(buffer, 0, read)
 
                         val pct = if (contentLength > 0L) {
                             ((downloadedBytes * 100L) / contentLength).toInt().coerceIn(10, 99)
@@ -450,11 +800,23 @@ object AlOstaApkUpdater {
                 }
                 input.close()
                 conn.disconnect()
+                activeInput = null
+                activeConn = null
 
-                if (tempApk.exists() && tempApk.length() > 50_000L) {
-                    if (targetApk.exists()) targetApk.delete()
-                    tempApk.renameTo(targetApk)
+                if (tempApk.exists() && tempApk.length() >= MIN_VALID_APK_BYTES && moveFileSafely(tempApk, targetApk)) {
                     val readyApk = unwrapIfNestedZip(targetApk)
+
+                    if (!isValidApkArchive(readyApk)) {
+                        readyApk.delete()
+                        isDownloading = false
+                        notifyWebView(
+                            webViewProvider,
+                            "error",
+                            0,
+                            "⚠️ الملف الذي تم تنزيله غير صالح أو تالف (ليس ملف APK). يرجى التحقق من ملف التحديث المرفوع."
+                        )
+                        return@Thread
+                    }
 
                     val archiveInfo = try {
                         context.packageManager.getPackageArchiveInfo(readyApk.absolutePath, 0)
@@ -464,6 +826,7 @@ object AlOstaApkUpdater {
                     if (archiveInfo != null) {
                         val downloadedPkg = archiveInfo.packageName ?: ""
                         if (downloadedPkg.isNotEmpty() && downloadedPkg != context.packageName) {
+                            readyApk.delete()
                             isDownloading = false
                             val mismatchMsg = if (downloadedPkg.contains("dashboard", ignoreCase = true)) {
                                 "⚠️ الملف المرفوع في الرابط هو (تطبيق الداشبورد) وليس التطبيق الرئيسي (الأسطة)! يرجى رفع AlOsta_App.apk الصحيح في الإعدادات."
@@ -495,6 +858,7 @@ object AlOstaApkUpdater {
                             0L
                         }
                         if (archiveVersionCode in 1 until currentVersionCode) {
+                            readyApk.delete()
                             isDownloading = false
                             notifyWebView(
                                 webViewProvider,
@@ -517,35 +881,47 @@ object AlOstaApkUpdater {
                     launchPackageInstaller(context, readyApk, webViewProvider)
                 } else {
                     tempApk.delete()
+                    targetApk.delete()
                     isDownloading = false
                     notifyWebView(
                         webViewProvider,
-                        "external",
-                        100,
-                        "تم فتح رابط التحديث المباشر في المتصفح"
+                        "error",
+                        0,
+                        "⚠️ لم يكتمل تنزيل ملف التحديث أو أن حجمه غير صحيح. جرب مرة أخرى أو افتح الرابط في المتصفح."
                     )
-                    openInExternalBrowser(context, initialUrl)
                 }
             } catch (e: Exception) {
+                try {
+                    activeInput?.close()
+                } catch (_: Exception) {
+                }
+                try {
+                    activeConn?.disconnect()
+                } catch (_: Exception) {
+                }
                 try {
                     tempApk.delete()
                 } catch (_: Exception) {
                 }
                 isDownloading = false
-                notifyWebView(
-                    webViewProvider,
-                    "error",
-                    0,
-                    "تعذر التحميل المباشر داخل التطبيق، جرب الضغط على (فتح الرابط في المتصفح)"
-                )
-                openInExternalBrowser(context, initialUrl)
+                val errMsg = when (e) {
+                    is java.io.FileNotFoundException ->
+                        "⚠️ ملف التحديث غير موجود على الرابط (404). يرجى التأكد من الرابط في لوحة التحكم."
+                    is java.net.UnknownHostException ->
+                        "⚠️ تعذر الوصول للخادم — تحقق من اتصال الإنترنت أو من صحة رابط التحديث."
+                    is java.net.SocketTimeoutException ->
+                        "⚠️ انتهت مهلة الاتصال أثناء تنزيل التحديث — تحقق من سرعة الإنترنت وحاول مجدداً."
+                    else ->
+                        "تعذر التحميل المباشر داخل التطبيق، يمكنك الضغط على (فتح الرابط المباشر في المتصفح)."
+                }
+                notifyWebView(webViewProvider, "error", 0, errMsg)
             }
         }.start()
     }
 
-    private fun unwrapIfNestedZip(downloadedFile: java.io.File): java.io.File {
+    private fun unwrapIfNestedZip(downloadedFile: File): File {
         return try {
-            java.util.zip.ZipFile(downloadedFile).use { zip ->
+            ZipFile(downloadedFile).use { zip ->
                 if (zip.getEntry("AndroidManifest.xml") != null) {
                     return downloadedFile
                 }
@@ -556,27 +932,29 @@ object AlOstaApkUpdater {
                     !it.name.contains("..") && it.name.endsWith(".apk", ignoreCase = true) && !it.isDirectory
                 }
                 if (apkEntry != null) {
-                    val maxAllowedApkBytes = 150L * 1024L * 1024L // 150 MB guard against Zip Bomb
-                    val extractedFile = java.io.File(downloadedFile.parentFile, "AlOsta_Extracted_Update.apk")
+                    val extractedFile = File(downloadedFile.parentFile, "AlOsta_Extracted_${System.currentTimeMillis()}.apk")
                     if (extractedFile.exists()) extractedFile.delete()
                     zip.getInputStream(apkEntry).use { input ->
-                        java.io.FileOutputStream(extractedFile).use { out ->
+                        FileOutputStream(extractedFile).use { out ->
                             val buf = ByteArray(16384)
                             var totalCopied = 0L
                             while (true) {
                                 val r = input.read(buf)
                                 if (r <= 0) break
                                 totalCopied += r
-                                if (totalCopied > maxAllowedApkBytes) {
+                                if (totalCopied > MAX_ALLOWED_APK_BYTES) {
                                     throw SecurityException("APK entry exceeds maximum safe size")
                                 }
                                 out.write(buf, 0, r)
                             }
+                            out.flush()
                         }
                     }
-                    if (extractedFile.exists() && extractedFile.length() > 50_000L) {
-                        downloadedFile.delete()
-                        extractedFile.renameTo(downloadedFile)
+                    if (extractedFile.exists() && extractedFile.length() >= MIN_VALID_APK_BYTES) {
+                        if (moveFileSafely(extractedFile, downloadedFile)) {
+                            return downloadedFile
+                        }
+                        return extractedFile
                     }
                 }
             }
@@ -588,15 +966,15 @@ object AlOstaApkUpdater {
 
     fun exportAndShareCurrentApk(context: Context): String {
         return try {
-            val sourceApk = java.io.File(context.applicationInfo.sourceDir)
+            val sourceApk = File(context.applicationInfo.sourceDir)
             if (!sourceApk.exists()) return ""
 
             val isDashPkg = context.packageName.contains("dashboard", ignoreCase = true)
             val exportFileName = if (isDashPkg) "AlOsta_Dashboard.apk" else "AlOsta_App.apk"
             val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.cacheDir
-            val exportDir = java.io.File(baseDir, "exported_apks")
+            val exportDir = File(baseDir, "exported_apks")
             if (!exportDir.exists()) exportDir.mkdirs()
-            val outApk = java.io.File(exportDir, exportFileName)
+            val outApk = File(exportDir, exportFileName)
             sourceApk.copyTo(outApk, overwrite = true)
 
             try {
@@ -610,7 +988,7 @@ object AlOstaApkUpdater {
                     val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
                     if (uri != null) {
                         resolver.openOutputStream(uri)?.use { outStream ->
-                            java.io.FileInputStream(sourceApk).use { inStream ->
+                            FileInputStream(sourceApk).use { inStream ->
                                 inStream.copyTo(outStream)
                             }
                         }
@@ -651,16 +1029,19 @@ object AlOstaApkUpdater {
     }
 
     fun openInExternalBrowser(context: Context, rawUrl: String) {
-        val directUrl = toDirectDownloadUrl(rawUrl)
+        val browserUrl = toBrowserFriendlyUrl(rawUrl)
+        if (browserUrl.isEmpty() || !AlOstaSecurityVault.isSafeExternalHttpUrl(browserUrl)) return
         mainHandler.post {
             try {
-                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(directUrl)).apply {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(browserUrl)).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    addCategory(Intent.CATEGORY_BROWSABLE)
                 }
                 context.startActivity(intent)
             } catch (_: Exception) {
                 try {
-                    val fallback = Intent(Intent.ACTION_VIEW, Uri.parse(rawUrl.trim())).apply {
+                    val fallbackUrl = sanitizeInputUrl(rawUrl)
+                    val fallback = Intent(Intent.ACTION_VIEW, Uri.parse(fallbackUrl)).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
                     context.startActivity(fallback)

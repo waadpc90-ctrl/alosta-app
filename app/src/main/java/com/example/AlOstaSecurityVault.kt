@@ -98,10 +98,18 @@ object AlOstaSecurityVault {
     fun isSafeExternalHttpUrl(rawUrl: String?): Boolean {
         if (rawUrl.isNullOrBlank()) return false
         return try {
-            val parsed = java.net.URI(rawUrl.trim())
-            val scheme = (parsed.scheme ?: "").lowercase(Locale.ROOT)
+            val trimmed = rawUrl.trim()
+            val encoded = trimmed.replace(" ", "%20")
+            val (schemeRaw, hostRaw) = try {
+                val parsed = java.net.URI(encoded)
+                Pair(parsed.scheme ?: "", parsed.host ?: "")
+            } catch (_: Exception) {
+                val urlObj = java.net.URL(encoded)
+                Pair(urlObj.protocol ?: "", urlObj.host ?: "")
+            }
+            val scheme = schemeRaw.lowercase(Locale.ROOT)
             if (scheme != "https" && scheme != "http") return false
-            val host = (parsed.host ?: "").lowercase(Locale.ROOT).trim('[', ']')
+            val host = hostRaw.lowercase(Locale.ROOT).trim('[', ']')
             if (host.isEmpty()) return false
             if (host == "localhost" ||
                 host == "127.0.0.1" ||

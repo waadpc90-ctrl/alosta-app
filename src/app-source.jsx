@@ -14528,18 +14528,28 @@
         };
 
         const normalizeUpdateApkUrl = (rawUrl) => {
-            const url = String(rawUrl || '').trim();
+            let url = String(rawUrl || '').trim();
             if (!url) return '';
+            if (!/^https?:\/\//i.test(url) && url.includes('.') && !url.includes('://')) {
+                url = 'https://' + url;
+            }
             if (/drive\.google\.com|docs\.google\.com|drive\.usercontent\.google\.com/i.test(url)) {
                 const m = url.match(/\/file\/d\/([a-zA-Z0-9_-]{10,})/) ||
                           url.match(/\/d\/([a-zA-Z0-9_-]{10,})/) ||
                           url.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);
                 if (m && m[1]) {
-                    return `https://drive.usercontent.google.com/download?id=${m[1]}&export=download&confirm=t&authuser=0`;
+                    return `https://drive.google.com/uc?export=download&id=${m[1]}`;
                 }
             }
+            const ghMatch = url.match(/^https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s]+)\/(?:blob|raw)\/([^/\s]+)\/(.+)$/i);
+            if (ghMatch) {
+                const cleanPath = ghMatch[4].split('?')[0].split('#')[0];
+                return `https://raw.githubusercontent.com/${ghMatch[1]}/${ghMatch[2]}/${ghMatch[3]}/${cleanPath}`;
+            }
             if (/dropbox\.com/i.test(url)) {
-                return url.replace(/\?dl=0\b/, '?dl=1').replace(/&dl=0\b/, '&dl=1');
+                if (/[?&]dl=0\b/i.test(url)) return url.replace(/([?&])dl=0\b/i, '$1dl=1');
+                if (/[?&]dl=1\b/i.test(url)) return url;
+                return url + (url.includes('?') ? '&dl=1' : '?dl=1');
             }
             return url;
         };
@@ -14689,8 +14699,9 @@
                 const directUrl = normalizeUpdateApkUrl(rawUrl);
 
                 if ((dlState === 'ready' || dlState === 'installing' || dlState === 'permission_needed') && window.AndroidApp && typeof window.AndroidApp.installDownloadedApk === 'function') {
-                    window.AndroidApp.installDownloadedApk();
-                    return;
+                    const launched = window.AndroidApp.installDownloadedApk();
+                    if (launched) return;
+                    // Cached APK was evicted or missing: transparently re-download below
                 }
 
                 setDlState('downloading');
@@ -14713,7 +14724,7 @@
                 if (!rawUrl) return;
                 const directUrl = normalizeUpdateApkUrl(rawUrl);
                 if (window.AndroidApp && typeof window.AndroidApp.openExternalUpdateUrl === 'function') {
-                    window.AndroidApp.openExternalUpdateUrl(directUrl);
+                    window.AndroidApp.openExternalUpdateUrl(rawUrl);
                 } else {
                     window.open(directUrl, '_blank');
                 }
@@ -15136,8 +15147,20 @@
             }, []);
 
             useEffect(() => {
+                const role = s?.type === 'admin' ? 'contractor' : (s?.type === 'worker' ? 'worker' : 'guest');
+                const accId = s?.type === 'admin' ? String(s.data || '') : String(s?.data?.id || '');
+                try {
+                    if (window.AndroidApp && typeof window.AndroidApp.registerNotificationProfile === 'function') {
+                        window.AndroidApp.registerNotificationProfile(
+                            role,
+                            accId,
+                            APP_VERSION,
+                            firebaseConfig.projectId || '',
+                            firebaseConfig.apiKey || ''
+                        );
+                    }
+                } catch (e) {}
                 if (!s || !db || !window.AlOstaSecurityGuard) return;
-                const accId = s.type === 'admin' ? s.data : (s.data?.id || '');
                 if (accId) {
                     window.AlOstaSecurityGuard.bindSessionToAuthUid(db, s.type, accId).catch(() => {});
                 }
@@ -15158,6 +15181,11 @@
                 setS(x);
             };
             const out = () => {
+                try {
+                    if (window.AndroidApp && typeof window.AndroidApp.clearNotificationProfile === 'function') {
+                        window.AndroidApp.clearNotificationProfile();
+                    }
+                } catch (e) {}
                 localStorage.removeItem('cw_v42_s');
                 setS(null);
             };

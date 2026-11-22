@@ -73,5 +73,61 @@ class ExampleUnitTest {
         val directUrl = AlOstaApkUpdater.toDirectDownloadUrl(sampleDriveUrl)
         assertTrue(directUrl.contains("drive.usercontent.google.com/download"))
         assertTrue(directUrl.contains("id=1aBcDeFgHiJkLmNoPqRsTuVwXyZ12345"))
+        assertFalse(directUrl.contains("authuser=0"))
+
+        val browserUrl = AlOstaApkUpdater.toBrowserFriendlyUrl(sampleDriveUrl)
+        assertEquals("https://drive.google.com/uc?export=download&id=1aBcDeFgHiJkLmNoPqRsTuVwXyZ12345", browserUrl)
+    }
+
+    @Test
+    fun apkUpdater_supportsGithubBlobRawLfsDropboxMediafireAndSpaces() {
+        assertEquals(
+            "https://raw.githubusercontent.com/waadpc90-ctrl/alustadh/main/AlOsta_App.apk",
+            AlOstaApkUpdater.toDirectDownloadUrl("https://github.com/waadpc90-ctrl/alustadh/blob/main/AlOsta_App.apk")
+        )
+        assertEquals(
+            "https://raw.githubusercontent.com/waadpc90-ctrl/alustadh/main/AlOsta_App.apk",
+            AlOstaApkUpdater.toDirectDownloadUrl("https://github.com/waadpc90-ctrl/alustadh/raw/main/AlOsta_App.apk")
+        )
+        assertEquals(
+            "https://media.githubusercontent.com/media/waadpc90-ctrl/alustadh/main/AlOsta_App.apk",
+            AlOstaApkUpdater.toGitHubLfsMediaUrl("https://raw.githubusercontent.com/waadpc90-ctrl/alustadh/main/AlOsta_App.apk")
+        )
+        assertEquals(
+            "https://www.dropbox.com/scl/fi/abc/AlOsta_App.apk?rlkey=xyz&dl=1",
+            AlOstaApkUpdater.toDirectDownloadUrl("https://www.dropbox.com/scl/fi/abc/AlOsta_App.apk?rlkey=xyz")
+        )
+        assertEquals(
+            "https://download1234.mediafire.com/abc/AlOsta_App.apk",
+            AlOstaApkUpdater.parseMediaFireDownloadUrl("""<a id="downloadButton" href="https://download1234.mediafire.com/abc/AlOsta_App.apk">Download</a>""")
+        )
+        assertEquals(
+            "https://waadpc90-ctrl.github.io/alustadh/AlOsta_App.apk",
+            AlOstaApkUpdater.parseHtmlDirectApkLink(
+                """<a href="./AlOsta_App.apk">Download</a>""",
+                "https://waadpc90-ctrl.github.io/alustadh/download.html"
+            )
+        )
+        assertTrue(AlOstaSecurityVault.isSafeExternalHttpUrl("https://example.com/AlOsta App v1.0.19.apk"))
+    }
+
+    @Test
+    fun backgroundNotifier_versionComparisonAndAudienceMatching() {
+        assertTrue(AlOstaBackgroundNotifier.isVersionNewer("1.0.20", "1.0.19"))
+        assertTrue(AlOstaBackgroundNotifier.isVersionNewer("1.1.0", "1.0.19"))
+        assertTrue(AlOstaBackgroundNotifier.isVersionNewer("v2.0.0", "1.9.9"))
+        assertFalse(AlOstaBackgroundNotifier.isVersionNewer("1.0.19", "1.0.19"))
+        assertFalse(AlOstaBackgroundNotifier.isVersionNewer("1.0.18", "1.0.19"))
+
+        assertTrue(AlOstaBackgroundNotifier.audienceMatchesRole("all", "contractor"))
+        assertTrue(AlOstaBackgroundNotifier.audienceMatchesRole("all", "worker"))
+        assertTrue(AlOstaBackgroundNotifier.audienceMatchesRole("contractors", "contractor"))
+        assertFalse(AlOstaBackgroundNotifier.audienceMatchesRole("contractors", "worker"))
+        assertTrue(AlOstaBackgroundNotifier.audienceMatchesRole("workers", "worker"))
+        assertFalse(AlOstaBackgroundNotifier.audienceMatchesRole("workers", "contractor"))
+
+        val (leftTitle, leftBody) = AlOstaBackgroundNotifier.formatPersonalAlert("left_site", "أحمد", "بناية المنصور", "")
+        assertTrue(leftTitle.contains("مغادرة"))
+        assertTrue(leftBody.contains("أحمد") && leftBody.contains("بناية المنصور"))
     }
 }

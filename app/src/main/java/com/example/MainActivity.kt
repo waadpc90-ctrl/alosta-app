@@ -98,6 +98,11 @@ private const val NOTIFICATION_CHANNEL_ID = "al_osta_notifications"
 
 open class MainActivity : ComponentActivity() {
 
+    companion object {
+        @Volatile
+        var isAppInForeground: Boolean = false
+    }
+
     protected open val isDashboardMode: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -107,6 +112,9 @@ open class MainActivity : ComponentActivity() {
             android.graphics.drawable.ColorDrawable(android.graphics.Color.parseColor("#EEF2FF"))
         )
         createNotificationChannel()
+        if (!isDashboardMode && !packageName.contains("dashboard", ignoreCase = true)) {
+            AlOstaBackgroundNotifier.schedulePeriodicCheck(this)
+        }
         // Clear WebView disk caches whenever versionCode OR build timestamp changes
         // (guarantees every APK rebuild loads fresh assets immediately while keeping warm-start fast)
         try {
@@ -161,10 +169,12 @@ open class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        isAppInForeground = true
         AlOstaApkUpdater.onActivityResume(this)
     }
 
     override fun onPause() {
+        isAppInForeground = false
         super.onPause()
         AlOstaLocationManager.pauseIfIdle(this)
         WorkerStepTracker.flushPendingDiskWrite(this)
@@ -233,9 +243,18 @@ class AndroidAppBridge(
 
     @JavascriptInterface
     fun startUpdate(apkUrl: String?) {
-        if (apkUrl.isNullOrBlank() || !isTrustedCallerOrigin()) return
-        if (!AlOstaSecurityVault.isSafeExternalHttpUrl(apkUrl)) return
-        AlOstaApkUpdater.startSmartUpdate(context, apkUrl, webViewProvider)
+        if (!isTrustedCallerOrigin()) return
+        val sanitized = AlOstaApkUpdater.sanitizeInputUrl(apkUrl ?: "")
+        if (sanitized.isBlank() || !AlOstaSecurityVault.isSafeExternalHttpUrl(sanitized)) {
+            AlOstaApkUpdater.notifyWebView(
+                webViewProvider,
+                "error",
+                0,
+                "⚠️ رابط التحديث غير صالح — يرجى التحقق من الرابط في لوحة التحكم."
+            )
+            return
+        }
+        AlOstaApkUpdater.startSmartUpdate(context, sanitized, webViewProvider)
     }
 
     @JavascriptInterface
@@ -245,8 +264,9 @@ class AndroidAppBridge(
 
     @JavascriptInterface
     fun openExternalUpdateUrl(apkUrl: String?) {
-        if (apkUrl.isNullOrBlank()) return
-        AlOstaApkUpdater.openInExternalBrowser(context, apkUrl)
+        val sanitized = AlOstaApkUpdater.sanitizeInputUrl(apkUrl ?: "")
+        if (sanitized.isBlank() || !AlOstaSecurityVault.isSafeExternalHttpUrl(sanitized)) return
+        AlOstaApkUpdater.openInExternalBrowser(context, sanitized)
     }
 
     @JavascriptInterface
@@ -462,6 +482,31 @@ class AndroidAppBridge(
             } catch (_: Exception) {
             }
         }
+    }
+
+    @JavascriptInterface
+    fun registerNotificationProfile(
+        role: String?,
+        userId: String?,
+        appVersion: String?,
+        projectId: String?,
+        apiKey: String?
+    ) {
+        if (!isTrustedCallerOrigin()) return
+        AlOstaBackgroundNotifier.saveProfile(
+            context = context,
+            role = role ?: "guest",
+            userId = userId ?: "",
+            appVersion = appVersion ?: BuildConfig.VERSION_NAME,
+            projectId = projectId ?: "",
+            apiKey = apiKey ?: ""
+        )
+    }
+
+    @JavascriptInterface
+    fun clearNotificationProfile() {
+        if (!isTrustedCallerOrigin()) return
+        AlOstaBackgroundNotifier.clearUserSession(context)
     }
 
     @JavascriptInterface
@@ -1008,6 +1053,19 @@ fun AlOstaAppScreen(
                                     transport.webView = tempWebView
                                     resultMsg.sendToTarget()
                                     return true
+                                }
+                            }
+
+                            setDownloadListener { url, _, _, mimeType, _ ->
+                                val sanitized = AlOstaApkUpdater.sanitizeInputUrl(url ?: "")
+                                if (sanitized.isNotBlank() && AlOstaSecurityVault.isSafeExternalHttpUrl(sanitized)) {
+                                    if (sanitized.endsWith(".apk", ignoreCase = true) ||
+                                        mimeType.equals("application/vnd.android.package-archive", ignoreCase = true)
+                                    ) {
+                                        AlOstaApkUpdater.startSmartUpdate(ctx, sanitized) { this }
+                                    } else {
+                                        AlOstaApkUpdater.openInExternalBrowser(ctx, sanitized)
+                                    }
                                 }
                             }
 
