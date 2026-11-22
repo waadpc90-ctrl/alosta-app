@@ -3,7 +3,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.19";
+        const APP_VERSION = "1.0.20";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
