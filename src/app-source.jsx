@@ -5248,8 +5248,13 @@
                 storeId: '',
                 brandKey: 'jotun',
                 lockedBrandKey: null,
+                openedFromCatalog: false,
+                step: 'color',
                 shadeGroup: 'all',
                 searchQ: '',
+                productSearchQ: '',
+                showAllStoreProducts: false,
+                customProductName: '',
                 selectedColor: null,
                 customCode: '',
                 isPlainWhite: false,
@@ -5257,8 +5262,9 @@
                 qty: 1
             });
 
-            const openPaintColorPicker = (prod, storeOverride = null, explicitLockBrandKey = null) => {
+            const openPaintColorPicker = (prod, storeOverride = null, explicitLockBrandKey = null, options = {}) => {
                 haptic();
+                const openedFromCatalog = Boolean(options?.openedFromCatalog || !prod);
                 const targetStore = storeOverride || effectiveStoresList.find(s => s.id === prod?.storeId) || selectedShowroom || null;
                 const targetStoreId = prod?.storeId || targetStore?.id || '';
                 const cartStoreId = ecomCart[0]?.storeId;
@@ -5276,17 +5282,22 @@
                     setProdStoreFilter(targetStoreId);
                 }
                 const exclusiveBrand = getStoreExclusiveBrand(targetStore);
-                const detectedBrandKey = explicitLockBrandKey || exclusiveBrand?.id || detectPaintBrandKey(prod);
+                const detectedBrandKey = explicitLockBrandKey || exclusiveBrand?.id || detectPaintBrandKey(prod || targetStore);
                 const brandObj = PAINT_BRANDS_CATALOG.find(b => b.id === detectedBrandKey) || PAINT_BRANDS_CATALOG[0];
-                const defaultSwatch = brandObj.hasCatalog && brandObj.colors.length > 0 ? brandObj.colors[0] : null;
+                const defaultSwatch = (!openedFromCatalog && brandObj.hasCatalog && brandObj.colors.length > 0) ? brandObj.colors[0] : null;
                 setPaintPickerState({
                     open: true,
-                    product: prod,
+                    product: openedFromCatalog ? null : prod,
                     storeId: targetStoreId,
                     brandKey: brandObj.id,
                     lockedBrandKey: brandObj.id,
+                    openedFromCatalog,
+                    step: 'color',
                     shadeGroup: 'all',
                     searchQ: '',
+                    productSearchQ: '',
+                    showAllStoreProducts: false,
+                    customProductName: '',
                     selectedColor: defaultSwatch,
                     customCode: '',
                     isPlainWhite: false,
@@ -5301,21 +5312,8 @@
                 const exclusiveBrand = (forcedBrandKey && PAINT_BRANDS_CATALOG.find(b => b.id === forcedBrandKey))
                     || getStoreExclusiveBrand(storeObj, storeProds)
                     || PAINT_BRANDS_CATALOG[0];
-                const paintProds = storeProds.filter(p => isPaintColorProduct(p));
-                const chosenProd = paintProds[0] || {
-                    id: `agency_paint_${storeObj.id}_${exclusiveBrand.id}`,
-                    name: `صبغ ${exclusiveBrand.nameAr} أصلي (حسب الكود المختار)`,
-                    category: 'paint',
-                    brand: exclusiveBrand.nameAr,
-                    paintBrandKey: exclusiveBrand.id,
-                    requiresColorCode: true,
-                    price: 0,
-                    unit: 'دبة / سطل',
-                    icon: '🎨',
-                    storeId: storeObj.id,
-                    storeName: storeObj.name
-                };
-                openPaintColorPicker(chosenProd, storeObj, exclusiveBrand.id);
+                // Always start with product=null so after choosing a color the contractor explicitly picks which product that color applies to.
+                openPaintColorPicker(null, storeObj, exclusiveBrand.id, { openedFromCatalog: true });
             };
 
             const addToEcomCart = (prod, directColorMeta = null) => {
@@ -5366,9 +5364,7 @@
                 addToast(lang === 'ar' ? `تمت إضافة "${prod.name}"${toastDetails} إلى سلة الطلبات ✓` : `Added to cart ✓`);
             };
 
-            const confirmAddPaintWithColor = () => {
-                const prod = paintPickerState.product;
-                if (!prod) return;
+            const confirmAddPaintWithColor = (overrideProd = null) => {
                 const effectiveKey = paintPickerState.lockedBrandKey || paintPickerState.brandKey;
                 const brandObj = PAINT_BRANDS_CATALOG.find(b => b.id === effectiveKey) || PAINT_BRANDS_CATALOG[0];
                 const finishObj = PAINT_FINISH_OPTIONS.find(f => f.id === paintPickerState.finishId) || PAINT_FINISH_OPTIONS[0];
@@ -5391,8 +5387,39 @@
                     colorName = `${paintPickerState.selectedColor.nameAr} - ${paintPickerState.selectedColor.nameEn}`;
                     colorHex = paintPickerState.selectedColor.hex;
                 } else {
+                    setPaintPickerState(prev => ({ ...prev, step: 'color' }));
                     addToast(lang === 'ar' ? 'يرجى اختيار كود اللون من المسطرة أو كتابة رقم الكود أو اختيار أبيض سادة 🎨' : 'Please select or enter a color code');
                     return;
+                }
+
+                let prod = overrideProd || paintPickerState.product;
+                if (!prod) {
+                    const customProdTitle = String(paintPickerState.customProductName || '').trim();
+                    const targetStoreId = paintPickerState.storeId || selectedShowroom?.id || '';
+                    const targetStoreObj = effectiveStoresList.find(s => s.id === targetStoreId) || selectedShowroom || null;
+                    const storeHasAnyProducts = targetStoreId
+                        ? effectiveProductsList.some(p => p.storeId === targetStoreId)
+                        : false;
+
+                    if (!storeHasAnyProducts && customProdTitle) {
+                        prod = {
+                            id: `agency_custom_${targetStoreId || 'store'}_${brandObj.id}_${customProdTitle.replace(/\s+/g, '_').slice(0, 24)}`,
+                            name: `${customProdTitle} (${brandObj.shortAr})`,
+                            category: 'paint',
+                            brand: brandObj.nameAr,
+                            paintBrandKey: brandObj.id,
+                            requiresColorCode: true,
+                            price: 0,
+                            unit: 'دبة / سطل',
+                            icon: '🎨',
+                            storeId: targetStoreId,
+                            storeName: targetStoreObj?.name || ''
+                        };
+                    } else {
+                        setPaintPickerState(prev => ({ ...prev, step: 'product' }));
+                        addToast(lang === 'ar' ? 'يرجى تحديد المنتج الذي تريد تطبيق هذا اللون عليه أولاً 🪣' : 'Please select the product for this color first');
+                        return;
+                    }
                 }
 
                 const cartLineId = `${prod.id}__${brandObj.id}__${colorCode.replace(/\s+/g, '_')}__${finishObj.id}`;
@@ -5413,7 +5440,7 @@
                     paintFinishLabel: finishObj.shortAr,
                     colorSummaryText
                 });
-                setPaintPickerState(prev => ({ ...prev, open: false, product: null }));
+                setPaintPickerState(prev => ({ ...prev, open: false, product: null, step: 'color', customProductName: '' }));
             };
 
             const updateEcomCartQty = (prodId, delta) => {
@@ -11018,109 +11045,136 @@
 
                     {/* Official Paint Company Color & Code Selector Modal (z-[920] above all modals) */}
                     <Modal
-                        isOpen={Boolean(paintPickerState.open && paintPickerState.product)}
-                        onClose={() => setPaintPickerState(prev => ({ ...prev, open: false, product: null }))}
+                        isOpen={Boolean(paintPickerState.open && (paintPickerState.product || paintPickerState.openedFromCatalog))}
+                        onClose={() => setPaintPickerState(prev => ({ ...prev, open: false, product: null, step: 'color', customProductName: '' }))}
                         zIndexClass="z-[920]"
                         title={
-                            paintPickerState.lockedBrandKey
-                                ? (lang === 'ar'
-                                    ? `🎯 كتالوج ألوان وكالة ${(PAINT_BRANDS_CATALOG.find(b => b.id === paintPickerState.lockedBrandKey) || PAINT_BRANDS_CATALOG[0]).shortAr} الحصري`
-                                    : `🎯 Exclusive Agency Color Catalog`)
-                                : (lang === 'ar' ? '🎨 تحديد شركة الصبغ وكود اللون الأصلي' : '🎨 Select Paint Brand & Color Code')
+                            paintPickerState.step === 'product'
+                                ? (lang === 'ar' ? '🪣 الخطوة 2: حدّد المنتج لهذا اللون' : '🪣 Step 2: Select Product for Color')
+                                : (paintPickerState.lockedBrandKey
+                                    ? (lang === 'ar'
+                                        ? `🎯 كتالوج ألوان وكالة ${(PAINT_BRANDS_CATALOG.find(b => b.id === paintPickerState.lockedBrandKey) || PAINT_BRANDS_CATALOG[0]).shortAr} الحصري`
+                                        : `🎯 Exclusive Agency Color Catalog`)
+                                    : (lang === 'ar' ? '🎨 تحديد شركة الصبغ وكود اللون الأصلي' : '🎨 Select Paint Brand & Color Code'))
                         }
                     >
-                        {paintPickerState.product && (() => {
+                        {(paintPickerState.product || paintPickerState.openedFromCatalog) && (() => {
                             const prod = paintPickerState.product;
-                            const targetStoreId = paintPickerState.storeId || prod.storeId || selectedShowroom?.id || '';
+                            const targetStoreId = paintPickerState.storeId || prod?.storeId || selectedShowroom?.id || '';
                             const targetStoreObj = effectiveStoresList.find(s => s.id === targetStoreId) || selectedShowroom || null;
-                            const showroomPaintProds = targetStoreId
-                                ? effectiveProductsList.filter(p => p.storeId === targetStoreId && isPaintColorProduct(p))
+                            const allShowroomProds = targetStoreId
+                                ? effectiveProductsList.filter(p => p.storeId === targetStoreId)
                                 : [];
                             const effectiveBrandKey = paintPickerState.lockedBrandKey || paintPickerState.brandKey;
                             const activeBrand = PAINT_BRANDS_CATALOG.find(b => b.id === effectiveBrandKey) || PAINT_BRANDS_CATALOG[0];
+
+                            // Paintable products prioritized with matching agency brand first
+                            const showroomPaintProds = allShowroomProds
+                                .filter(p => isPaintColorProduct(p))
+                                .sort((a, b) => {
+                                    const aMatch = detectPaintBrandKey(a) === activeBrand.id ? 0 : 1;
+                                    const bMatch = detectPaintBrandKey(b) === activeBrand.id ? 0 : 1;
+                                    return aMatch - bMatch;
+                                });
+
+                            // If showroom has paint products, show them by default unless user toggles "all products";
+                            // if showroom has 0 paint-flagged products, automatically show all showroom products so user is never stuck.
+                            const baseSelectableProds = (paintPickerState.showAllStoreProducts || showroomPaintProds.length === 0)
+                                ? allShowroomProds
+                                : showroomPaintProds;
+                            const prodQ = String(paintPickerState.productSearchQ || '').trim().toLowerCase();
+                            const selectableProds = baseSelectableProds.filter(p => {
+                                if (!prodQ) return true;
+                                return `${p.name || ''} ${p.brand || ''} ${p.unit || ''} ${p.desc || ''}`.toLowerCase().includes(prodQ);
+                            });
+
                             const q = String(paintPickerState.searchQ || '').trim().toLowerCase();
                             const filteredSwatches = (activeBrand.colors || []).filter(c => {
                                 if (paintPickerState.shadeGroup !== 'all' && c.group !== paintPickerState.shadeGroup) return false;
                                 if (!q) return true;
                                 return c.code.toLowerCase().includes(q) || c.nameAr.toLowerCase().includes(q) || c.nameEn.toLowerCase().includes(q);
                             });
-                            const unitPrice = parseFloat(prod.price || 0);
+
+                            const manualTrimmed = String(paintPickerState.customCode || '').trim();
+                            const hasChosenColor = Boolean(paintPickerState.isPlainWhite || manualTrimmed || paintPickerState.selectedColor);
+                            const activeColorCode = paintPickerState.isPlainWhite
+                                ? 'WHITE-00'
+                                : (manualTrimmed || paintPickerState.selectedColor?.code || '');
+                            const activeColorLabel = paintPickerState.isPlainWhite
+                                ? 'أبيض سادة (بدون تلوين)'
+                                : (manualTrimmed
+                                    ? `كود مخصص: ${manualTrimmed}`
+                                    : (paintPickerState.selectedColor
+                                        ? `${paintPickerState.selectedColor.nameAr} (${paintPickerState.selectedColor.nameEn})`
+                                        : 'لم يتم اختيار لون بعد'));
+                            const activeColorHex = paintPickerState.isPlainWhite
+                                ? '#FFFFFF'
+                                : (manualTrimmed
+                                    ? (paintPickerState.selectedColor?.hex || '#E2E8F0')
+                                    : (paintPickerState.selectedColor?.hex || '#CBD5E1'));
+
+                            const unitPrice = parseFloat(prod?.price || 0);
                             const lineTotal = unitPrice * (paintPickerState.qty || 1);
+                            const isProductStep = paintPickerState.step === 'product';
+                            const canProceedToProduct = hasChosenColor;
+
+                            const handleGoToProductStep = () => {
+                                haptic();
+                                if (!hasChosenColor) {
+                                    addToast(lang === 'ar' ? 'اختر اللون من الكتالوج أو اكتب الكود أولاً 🎨' : 'Pick a color first');
+                                    return;
+                                }
+                                setPaintPickerState(prev => ({ ...prev, step: 'product' }));
+                            };
 
                             return (
                                 <div className="space-y-3.5">
-                                    {/* Selected Product Header + Optional Switcher between Showroom's Paint Products */}
-                                    <div className="bg-slate-50 dark:bg-slate-900 p-3 rounded-2xl border border-slate-200 dark:border-slate-700 space-y-2.5">
-                                        <div className="flex items-center justify-between gap-2.5">
-                                            <div className="flex items-center gap-2.5 min-w-0">
-                                                <SmartMediaImg
-                                                    src={prod.imageUrl}
-                                                    alt=""
-                                                    className="w-12 h-12 rounded-xl object-cover border border-slate-200 dark:border-slate-700 shrink-0"
-                                                    fallbackIcon={prod.icon || '🎨'}
-                                                    fallbackClassName="w-12 h-12 rounded-xl bg-indigo-100 dark:bg-slate-800 flex items-center justify-center text-2xl shrink-0"
-                                                />
-                                                <div className="min-w-0">
-                                                    <p className="font-black text-xs text-slate-800 dark:text-white truncate">{prod.name}</p>
-                                                    <p className="text-[11px] font-black text-emerald-600 dark:text-emerald-400 dir-ltr text-right mt-0.5">
-                                                        {unitPrice > 0
-                                                            ? `${unitPrice.toLocaleString('en-US')} د.ع / ${prod.unit || 'دبة'}`
-                                                            : (targetStoreObj?.name || prod.storeName || 'وكالة أصباغ معتمدة')}
-                                                    </p>
-                                                </div>
-                                            </div>
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    haptic();
-                                                    setPaintPickerState(prev => ({
-                                                        ...prev,
-                                                        isPlainWhite: !prev.isPlainWhite,
-                                                        customCode: ''
-                                                    }));
-                                                }}
-                                                className={`shrink-0 px-3 py-2 rounded-xl text-[10px] font-black border transition-all active:scale-95 ${
-                                                    paintPickerState.isPlainWhite
-                                                        ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
-                                                        : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-300 dark:border-slate-600'
-                                                }`}
-                                            >
-                                                ⚪ أبيض سادة (بدون كود)
-                                            </button>
-                                        </div>
-
-                                        {showroomPaintProds.length > 1 && (
-                                            <div className="pt-2 border-t border-slate-200/70 dark:border-slate-700/70 space-y-1">
-                                                <p className="text-[10px] font-black text-slate-500">
-                                                    🪣 اختر نوع الصبغ المطلوب تلوينه من هذا المعرض:
-                                                </p>
-                                                <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
-                                                    {showroomPaintProds.map(sp => {
-                                                        const isSelProd = sp.id === prod.id;
-                                                        return (
-                                                            <button
-                                                                key={sp.id}
-                                                                type="button"
-                                                                onClick={() => {
-                                                                    haptic();
-                                                                    setPaintPickerState(prev => ({ ...prev, product: sp }));
-                                                                }}
-                                                                className={`shrink-0 px-2.5 py-1.5 rounded-xl text-[10px] font-black border transition-all ${
-                                                                    isSelProd
-                                                                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
-                                                                        : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700'
-                                                                }`}
-                                                            >
-                                                                {sp.name} ({Number(sp.price || 0).toLocaleString('en-US')} د.ع)
-                                                            </button>
-                                                        );
-                                                    })}
-                                                </div>
-                                            </div>
-                                        )}
+                                    {/* Two-Step Interactive Progress Header: Step 1 (Color) -> Step 2 (Product for this Color) */}
+                                    <div className="grid grid-cols-2 gap-2 bg-slate-100 dark:bg-slate-900 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-700">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                haptic();
+                                                setPaintPickerState(prev => ({ ...prev, step: 'color' }));
+                                            }}
+                                            className={`py-2 px-2.5 rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 transition-all ${
+                                                !isProductStep
+                                                    ? 'bg-indigo-600 text-white shadow-sm'
+                                                    : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200/70 dark:border-slate-700'
+                                            }`}
+                                        >
+                                            <span className={`w-5 h-5 rounded-full text-[10px] font-black flex items-center justify-center ${
+                                                !isProductStep
+                                                    ? 'bg-white text-indigo-700'
+                                                    : (hasChosenColor ? 'bg-emerald-500 text-white' : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300')
+                                            }`}>
+                                                {hasChosenColor && isProductStep ? '✓' : '1'}
+                                            </span>
+                                            <span>اختيار اللون</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={handleGoToProductStep}
+                                            className={`py-2 px-2.5 rounded-xl text-[11px] font-black flex items-center justify-center gap-1.5 transition-all ${
+                                                isProductStep
+                                                    ? 'bg-fuchsia-600 text-white shadow-sm'
+                                                    : (hasChosenColor
+                                                        ? 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-fuchsia-300 dark:border-fuchsia-700'
+                                                        : 'bg-slate-50 dark:bg-slate-800 text-slate-400 border border-transparent opacity-70')
+                                            }`}
+                                        >
+                                            <span className={`w-5 h-5 rounded-full text-[10px] font-black flex items-center justify-center ${
+                                                isProductStep
+                                                    ? 'bg-white text-fuchsia-700'
+                                                    : (prod ? 'bg-emerald-500 text-white' : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300')
+                                            }`}>
+                                                {prod && !isProductStep ? '✓' : '2'}
+                                            </span>
+                                            <span>تحديد المنتج للّون</span>
+                                        </button>
                                     </div>
 
-                                    {/* Exclusive Agency Banner (Configured in Dashboard for Showroom/Product) */}
+                                    {/* Exclusive Agency Banner */}
                                     <div className="bg-gradient-to-l from-fuchsia-950 via-indigo-950 to-slate-900 text-white p-3 rounded-2xl border border-fuchsia-500/30 flex items-center justify-between gap-2">
                                         <div className="min-w-0">
                                             <div className="flex items-center gap-1.5 flex-wrap">
@@ -11132,7 +11186,7 @@
                                                 </span>
                                             </div>
                                             <p className="text-[10px] font-bold text-indigo-200 truncate mt-0.5">
-                                                🏪 {targetStoreObj?.name || prod.storeName || 'المعرض المختار'}
+                                                🏪 {targetStoreObj?.name || prod?.storeName || 'المعرض المختار'}
                                             </p>
                                         </div>
                                         <span className="shrink-0 text-[10px] font-black px-2.5 py-1 rounded-xl bg-white/10 text-white border border-white/15">
@@ -11140,186 +11194,543 @@
                                         </span>
                                     </div>
 
-                                    {/* Color Code Selection Section: Full Catalog (Jotun, Berger, Blue/San Marco, Loggia) vs Brand Name Only (Betek, National) */}
-                                    {!paintPickerState.isPlainWhite && (
-                                        activeBrand.hasCatalog ? (
-                                            <div className="space-y-2.5 bg-slate-50 dark:bg-slate-900/90 p-3 rounded-2xl border border-slate-200 dark:border-slate-700">
-                                                {/* Shade Group Pills */}
-                                                <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1">
-                                                    {PAINT_SHADE_GROUPS.map(g => (
+                                    {!isProductStep ? (
+                                        /* ==================== STEP 1: CHOOSE COLOR FROM AGENCY CATALOG ==================== */
+                                        <div className="space-y-3">
+                                            {/* Current Linked Product Pill (if pre-selected) + Plain White Quick Option */}
+                                            <div className="bg-slate-50 dark:bg-slate-900 p-2.5 rounded-2xl border border-slate-200 dark:border-slate-700 flex items-center justify-between gap-2">
+                                                {prod ? (
+                                                    <div className="flex items-center gap-2 min-w-0">
+                                                        <SmartMediaImg
+                                                            src={prod.imageUrl}
+                                                            alt=""
+                                                            className="w-10 h-10 rounded-xl object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                                                            fallbackIcon={prod.icon || '🎨'}
+                                                            fallbackClassName="w-10 h-10 rounded-xl bg-indigo-100 dark:bg-slate-800 flex items-center justify-center text-xl shrink-0"
+                                                        />
+                                                        <div className="min-w-0">
+                                                            <p className="text-[9px] font-black text-slate-400">المنتج المحدد لهذا اللون:</p>
+                                                            <p className="font-black text-[11px] text-slate-800 dark:text-white truncate">{prod.name}</p>
+                                                            {allShowroomProds.length > 1 && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        haptic();
+                                                                        setPaintPickerState(prev => ({ ...prev, step: 'product' }));
+                                                                    }}
+                                                                    className="text-[10px] font-black text-indigo-600 dark:text-indigo-400 underline mt-0.5"
+                                                                >
+                                                                    تغيير المنتج 🪣
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <div className="min-w-0">
+                                                        <p className="font-black text-[11px] text-indigo-700 dark:text-indigo-300">
+                                                            1️⃣ اختر اللون المطلوب من كتالوج {activeBrand.shortAr}
+                                                        </p>
+                                                        <p className="text-[10px] font-bold text-slate-500 mt-0.5">
+                                                            بعد اختيار اللون ستنتقل تلقائياً لتحديد المنتج المراد تلوينه
+                                                        </p>
+                                                    </div>
+                                                )}
+
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        haptic();
+                                                        setPaintPickerState(prev => {
+                                                            const nextPlainWhite = !prev.isPlainWhite;
+                                                            return {
+                                                                ...prev,
+                                                                isPlainWhite: nextPlainWhite,
+                                                                customCode: '',
+                                                                step: (nextPlainWhite && prev.openedFromCatalog && !prev.product) ? 'product' : prev.step
+                                                            };
+                                                        });
+                                                    }}
+                                                    className={`shrink-0 px-3 py-2 rounded-xl text-[10px] font-black border transition-all active:scale-95 ${
+                                                        paintPickerState.isPlainWhite
+                                                            ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
+                                                            : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-300 dark:border-slate-600'
+                                                    }`}
+                                                >
+                                                    ⚪ أبيض سادة
+                                                </button>
+                                            </div>
+
+                                            {/* Color Code Selection Section */}
+                                            {!paintPickerState.isPlainWhite && (
+                                                activeBrand.hasCatalog ? (
+                                                    <div className="space-y-2.5 bg-slate-50 dark:bg-slate-900/90 p-3 rounded-2xl border border-slate-200 dark:border-slate-700">
+                                                        {/* Shade Group Pills */}
+                                                        <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1">
+                                                            {PAINT_SHADE_GROUPS.map(g => (
+                                                                <button
+                                                                    key={g.id}
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        haptic();
+                                                                        setPaintPickerState(prev => ({ ...prev, shadeGroup: g.id }));
+                                                                    }}
+                                                                    className={`shrink-0 px-2.5 py-1.5 rounded-xl text-[10px] font-black border transition-all ${
+                                                                        paintPickerState.shadeGroup === g.id
+                                                                            ? 'bg-fuchsia-600 text-white border-fuchsia-600'
+                                                                            : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                                                                    }`}
+                                                                >
+                                                                    {lang === 'ar' ? g.labelAr : g.labelEn}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+
+                                                        {/* Search in Catalog or Enter Any Custom Code */}
+                                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                                            <div className="relative">
+                                                                <Icon name="search" size={14} className="absolute right-3 top-3 text-slate-400" />
+                                                                <input
+                                                                    type="text"
+                                                                    value={paintPickerState.searchQ}
+                                                                    onChange={e => setPaintPickerState(prev => ({ ...prev, searchQ: e.target.value }))}
+                                                                    placeholder={`ابحث في مسطرة ${activeBrand.shortAr} (مثال: ${activeBrand.colors[0]?.code || '10341'})...`}
+                                                                    className="w-full py-2 pr-8 pl-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-[11px] font-bold outline-none"
+                                                                />
+                                                            </div>
+                                                            <input
+                                                                type="text"
+                                                                value={paintPickerState.customCode}
+                                                                onChange={e => setPaintPickerState(prev => ({ ...prev, customCode: e.target.value, isPlainWhite: false }))}
+                                                                placeholder="أو اكتب أي رقم كود آخر من الكتالوج الورقي..."
+                                                                className="w-full py-2 px-3 bg-white dark:bg-slate-800 border border-indigo-200 dark:border-slate-700 rounded-xl text-[11px] font-mono font-black outline-none text-center"
+                                                            />
+                                                        </div>
+
+                                                        {/* Visual Color Swatches Grid */}
+                                                        <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto pr-0.5">
+                                                            {filteredSwatches.map(swatch => {
+                                                                const isSelected = !paintPickerState.customCode && paintPickerState.selectedColor?.code === swatch.code;
+                                                                return (
+                                                                    <button
+                                                                        key={swatch.code}
+                                                                        type="button"
+                                                                        onClick={() => {
+                                                                            haptic();
+                                                                            setPaintPickerState(prev => ({
+                                                                                ...prev,
+                                                                                selectedColor: swatch,
+                                                                                customCode: '',
+                                                                                isPlainWhite: false,
+                                                                                // When opened from agency catalog without a chosen product, immediately move to Step 2 to pick which product this color applies to!
+                                                                                step: (prev.openedFromCatalog && !prev.product) ? 'product' : prev.step
+                                                                            }));
+                                                                        }}
+                                                                        className={`p-2 rounded-2xl border text-right flex items-center gap-2.5 transition-all active:scale-95 ${
+                                                                            isSelected
+                                                                                ? 'bg-indigo-50 dark:bg-indigo-950/70 border-2 border-indigo-600 ring-2 ring-indigo-500/20 shadow-xs'
+                                                                                : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700'
+                                                                        }`}
+                                                                    >
+                                                                        <div
+                                                                            className="w-10 h-10 rounded-xl border border-slate-300 dark:border-slate-600 shrink-0 shadow-inner flex items-center justify-center"
+                                                                            style={{ backgroundColor: swatch.hex }}
+                                                                        >
+                                                                            {isSelected && <span className="text-xs font-black text-slate-900 bg-white/80 rounded-full w-5 h-5 flex items-center justify-center">✓</span>}
+                                                                        </div>
+                                                                        <div className="min-w-0 flex-1">
+                                                                            <div className="flex items-center justify-between gap-1">
+                                                                                <span className="font-mono font-black text-xs text-indigo-700 dark:text-indigo-300 dir-ltr">
+                                                                                    {swatch.code}
+                                                                                </span>
+                                                                                <span className="text-[9px] font-bold text-slate-400 truncate dir-ltr">
+                                                                                    {swatch.nameEn}
+                                                                                </span>
+                                                                            </div>
+                                                                            <p className="text-[10px] font-black text-slate-700 dark:text-slate-200 truncate mt-0.5">
+                                                                                {swatch.nameAr}
+                                                                            </p>
+                                                                        </div>
+                                                                    </button>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    /* Betek & National: Brand Name Only (manual code or plain white) */
+                                                    <div className="bg-amber-50/70 dark:bg-slate-900 p-3.5 rounded-2xl border border-amber-200 dark:border-slate-700 space-y-2.5">
+                                                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                                                            <span className={`text-xs px-2.5 py-1 rounded-xl font-black border ${activeBrand.badgeClass}`}>
+                                                                🏷️ {activeBrand.nameAr}
+                                                            </span>
+                                                            <span className="text-[10px] font-bold text-slate-500">
+                                                                معتمدة كاسم شركة (كتابة الكود يدوياً)
+                                                            </span>
+                                                        </div>
+                                                        <input
+                                                            type="text"
+                                                            value={paintPickerState.customCode}
+                                                            onChange={e => setPaintPickerState(prev => ({ ...prev, customCode: e.target.value, isPlainWhite: false }))}
+                                                            placeholder={`اكتب رقم الكود أو اسم اللون لشركة ${activeBrand.shortAr} (أو اختر أبيض سادة أعلاه)...`}
+                                                            className="w-full p-3 bg-white dark:bg-slate-800 border border-amber-300 dark:border-slate-600 rounded-xl text-xs font-black outline-none text-center"
+                                                        />
+                                                    </div>
+                                                )
+                                            )}
+
+                                            {/* Step 1 Bottom Action Bar */}
+                                            {!prod ? (
+                                                /* Opened from agency catalog & product not selected yet -> MUST advance to Step 2 to pick product */
+                                                <div className="pt-2 border-t border-slate-200 dark:border-slate-700 space-y-2">
+                                                    {hasChosenColor && (
+                                                        <div className="flex items-center gap-2.5 bg-indigo-50/80 dark:bg-indigo-950/40 p-2.5 rounded-2xl border border-indigo-200 dark:border-indigo-800">
+                                                            <div
+                                                                className="w-9 h-9 rounded-xl border border-slate-300 dark:border-slate-600 shrink-0 shadow-inner"
+                                                                style={{ backgroundColor: activeColorHex }}
+                                                            />
+                                                            <div className="min-w-0 flex-1">
+                                                                <p className="text-[10px] font-black text-indigo-700 dark:text-indigo-300">
+                                                                    اللون المختار: {activeColorCode}
+                                                                </p>
+                                                                <p className="text-[11px] font-black text-slate-800 dark:text-white truncate">
+                                                                    {activeColorLabel}
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleGoToProductStep}
+                                                        disabled={!canProceedToProduct}
+                                                        className={`w-full py-3.5 px-4 rounded-2xl font-black text-xs flex items-center justify-center gap-2 transition-all active:scale-95 ${
+                                                            canProceedToProduct
+                                                                ? 'bg-gradient-to-r from-fuchsia-600 to-indigo-600 text-white shadow-lg shadow-indigo-600/25'
+                                                                : 'bg-slate-200 dark:bg-slate-800 text-slate-500 cursor-not-allowed'
+                                                        }`}
+                                                    >
+                                                        <span>🪣</span>
+                                                        <span>
+                                                            {canProceedToProduct
+                                                                ? `التالي: تحديد المنتج لهذا اللون (${activeColorCode}) ←`
+                                                                : 'اختر لوناً من الكتالوج أولاً للانتقال لتحديد المنتج'}
+                                                        </span>
+                                                    </button>
+                                                </div>
+                                            ) : (
+                                                /* Opened from a specific product card (product already selected, can still switch or finish directly) */
+                                                <div className="space-y-3">
+                                                    {/* Sheen / Finish Selector (درجة اللمعة) */}
+                                                    <div className="space-y-1.5">
+                                                        <label className="text-[11px] font-black text-slate-600 dark:text-slate-300 block">
+                                                            ✨ درجة اللمعة / نوع التشطيب:
+                                                        </label>
+                                                        <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1">
+                                                            {PAINT_FINISH_OPTIONS.map(fin => (
+                                                                <button
+                                                                    key={fin.id}
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        haptic();
+                                                                        setPaintPickerState(prev => ({ ...prev, finishId: fin.id }));
+                                                                    }}
+                                                                    className={`shrink-0 px-3 py-2 rounded-xl text-[10px] font-black border transition-all ${
+                                                                        paintPickerState.finishId === fin.id
+                                                                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                                                                            : 'bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                                                                    }`}
+                                                                >
+                                                                    {fin.labelAr}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Quantity & Confirm Button */}
+                                                    <div className="pt-2 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between gap-3">
+                                                        <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-900 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-700 shrink-0">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    haptic();
+                                                                    setPaintPickerState(prev => ({ ...prev, qty: Math.max(1, (prev.qty || 1) - 1) }));
+                                                                }}
+                                                                className="w-8 h-8 rounded-xl bg-white dark:bg-slate-800 font-black text-base shadow-2xs"
+                                                            >
+                                                                -
+                                                            </button>
+                                                            <span className="px-2 font-black text-sm text-indigo-600 dark:text-indigo-400 min-w-[28px] text-center">
+                                                                {paintPickerState.qty || 1}
+                                                            </span>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    haptic();
+                                                                    setPaintPickerState(prev => ({ ...prev, qty: (prev.qty || 1) + 1 }));
+                                                                }}
+                                                                className="w-8 h-8 rounded-xl bg-indigo-600 text-white font-black text-base shadow-2xs"
+                                                            >
+                                                                +
+                                                            </button>
+                                                        </div>
+
                                                         <button
-                                                            key={g.id}
+                                                            type="button"
+                                                            onClick={() => confirmAddPaintWithColor()}
+                                                            className="flex-1 py-3.5 px-4 bg-gradient-to-r from-fuchsia-600 to-indigo-600 text-white rounded-2xl font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/25 active:scale-95"
+                                                        >
+                                                            <Icon name="check" size={16} />
+                                                            <span className="truncate">
+                                                                اعتماد اللون وإضافة ({lineTotal.toLocaleString('en-US')} د.ع) ✓
+                                                            </span>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        /* ==================== STEP 2: CHOOSE PRODUCT FOR THE SELECTED COLOR ==================== */
+                                        <div className="space-y-3">
+                                            {/* Sticky Selected Color Summary Card with Change Color button */}
+                                            <div className="bg-indigo-50/90 dark:bg-indigo-950/50 p-3 rounded-2xl border-2 border-indigo-300 dark:border-indigo-700 flex items-center justify-between gap-2.5">
+                                                <div className="flex items-center gap-2.5 min-w-0">
+                                                    <div
+                                                        className="w-12 h-12 rounded-2xl border-2 border-white dark:border-slate-700 shadow-md shrink-0 flex items-center justify-center"
+                                                        style={{ backgroundColor: activeColorHex }}
+                                                    >
+                                                        {paintPickerState.isPlainWhite && <span className="text-xs font-black text-slate-600">⚪</span>}
+                                                    </div>
+                                                    <div className="min-w-0">
+                                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                                            <span className="text-[10px] font-black px-2 py-0.5 rounded-lg bg-indigo-600 text-white dir-ltr font-mono">
+                                                                {activeColorCode || 'لون محدد'}
+                                                            </span>
+                                                            <span className="text-[10px] font-black text-indigo-700 dark:text-indigo-300">
+                                                                {activeBrand.shortAr}
+                                                            </span>
+                                                        </div>
+                                                        <p className="text-xs font-black text-slate-800 dark:text-white truncate mt-0.5">
+                                                            {activeColorLabel}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        haptic();
+                                                        setPaintPickerState(prev => ({ ...prev, step: 'color' }));
+                                                    }}
+                                                    className="shrink-0 px-3 py-2 rounded-xl bg-white dark:bg-slate-800 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-700 text-[10px] font-black active:scale-95"
+                                                >
+                                                    🎨 تغيير اللون
+                                                </button>
+                                            </div>
+
+                                            {/* Mandatory Product Selector for this Color */}
+                                            <div className="bg-slate-50 dark:bg-slate-900/90 p-3 rounded-2xl border border-slate-200 dark:border-slate-700 space-y-2.5">
+                                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                                    <div>
+                                                        <p className="text-xs font-black text-slate-800 dark:text-white">
+                                                            🪣 حدّد المنتج الذي يُطبّق عليه هذا اللون:
+                                                        </p>
+                                                        <p className="text-[10px] font-bold text-slate-500 mt-0.5">
+                                                            اختر نوع الدبة أو السطل من منتجات "{targetStoreObj?.name || 'المعرض'}"
+                                                        </p>
+                                                    </div>
+                                                    {showroomPaintProds.length > 0 && allShowroomProds.length > showroomPaintProds.length && (
+                                                        <button
                                                             type="button"
                                                             onClick={() => {
                                                                 haptic();
-                                                                setPaintPickerState(prev => ({ ...prev, shadeGroup: g.id }));
+                                                                setPaintPickerState(prev => ({
+                                                                    ...prev,
+                                                                    showAllStoreProducts: !prev.showAllStoreProducts
+                                                                }));
                                                             }}
-                                                            className={`shrink-0 px-2.5 py-1.5 rounded-xl text-[10px] font-black border transition-all ${
-                                                                paintPickerState.shadeGroup === g.id
-                                                                    ? 'bg-fuchsia-600 text-white border-fuchsia-600'
-                                                                    : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                                                            }`}
+                                                            className="text-[10px] font-black px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-slate-700"
                                                         >
-                                                            {lang === 'ar' ? g.labelAr : g.labelEn}
+                                                            {paintPickerState.showAllStoreProducts
+                                                                ? `عرض الأصباغ فقط (${showroomPaintProds.length})`
+                                                                : `عرض كل منتجات المعرض (${allShowroomProds.length})`}
                                                         </button>
-                                                    ))}
+                                                    )}
                                                 </div>
 
-                                                {/* Search in Catalog or Enter Any Custom Code */}
-                                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                                {baseSelectableProds.length > 4 && (
                                                     <div className="relative">
                                                         <Icon name="search" size={14} className="absolute right-3 top-3 text-slate-400" />
                                                         <input
                                                             type="text"
-                                                            value={paintPickerState.searchQ}
-                                                            onChange={e => setPaintPickerState(prev => ({ ...prev, searchQ: e.target.value }))}
-                                                            placeholder={`ابحث في مسطرة ${activeBrand.shortAr} (مثال: ${activeBrand.colors[0]?.code || '10341'})...`}
-                                                            className="w-full py-2 pr-8 pl-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-[11px] font-bold outline-none"
+                                                            value={paintPickerState.productSearchQ}
+                                                            onChange={e => setPaintPickerState(prev => ({ ...prev, productSearchQ: e.target.value }))}
+                                                            placeholder="ابحث عن اسم المنتج أو الحجم (مثال: فينوماستيك، 18 لتر)..."
+                                                            className="w-full py-2 pr-8 pl-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-[11px] font-bold outline-none"
                                                         />
                                                     </div>
-                                                    <input
-                                                        type="text"
-                                                        value={paintPickerState.customCode}
-                                                        onChange={e => setPaintPickerState(prev => ({ ...prev, customCode: e.target.value, isPlainWhite: false }))}
-                                                        placeholder="أو اكتب أي رقم كود آخر من الكتالوج الورقي..."
-                                                        className="w-full py-2 px-3 bg-white dark:bg-slate-800 border border-indigo-200 dark:border-slate-700 rounded-xl text-[11px] font-mono font-black outline-none text-center"
-                                                    />
-                                                </div>
+                                                )}
 
-                                                {/* Visual Color Swatches Grid */}
-                                                <div className="grid grid-cols-2 gap-2 max-h-52 overflow-y-auto pr-0.5">
-                                                    {filteredSwatches.map(swatch => {
-                                                        const isSelected = !paintPickerState.customCode && paintPickerState.selectedColor?.code === swatch.code;
-                                                        return (
-                                                            <button
-                                                                key={swatch.code}
-                                                                type="button"
-                                                                onClick={() => {
-                                                                    haptic();
-                                                                    setPaintPickerState(prev => ({
-                                                                        ...prev,
-                                                                        selectedColor: swatch,
-                                                                        customCode: '',
-                                                                        isPlainWhite: false
-                                                                    }));
-                                                                }}
-                                                                className={`p-2 rounded-2xl border text-right flex items-center gap-2.5 transition-all active:scale-95 ${
-                                                                    isSelected
-                                                                        ? 'bg-indigo-50 dark:bg-indigo-950/70 border-2 border-indigo-600 ring-2 ring-indigo-500/20 shadow-xs'
-                                                                        : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700'
-                                                                }`}
-                                                            >
-                                                                <div
-                                                                    className="w-10 h-10 rounded-xl border border-slate-300 dark:border-slate-600 shrink-0 shadow-inner flex items-center justify-center"
-                                                                    style={{ backgroundColor: swatch.hex }}
+                                                {selectableProds.length > 0 ? (
+                                                    <div className="space-y-2 max-h-56 overflow-y-auto pr-0.5">
+                                                        {selectableProds.map(sp => {
+                                                            const isSelProd = prod?.id === sp.id;
+                                                            const spPrice = parseFloat(sp.price || 0);
+                                                            return (
+                                                                <button
+                                                                    key={sp.id}
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        haptic();
+                                                                        setPaintPickerState(prev => ({ ...prev, product: sp }));
+                                                                    }}
+                                                                    className={`w-full p-2.5 rounded-2xl border text-right flex items-center gap-2.5 transition-all active:scale-95 ${
+                                                                        isSelProd
+                                                                            ? 'bg-fuchsia-50 dark:bg-fuchsia-950/60 border-2 border-fuchsia-600 ring-2 ring-indigo-500/20 shadow-xs'
+                                                                            : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700'
+                                                                    }`}
                                                                 >
-                                                                    {isSelected && <span className="text-xs font-black text-slate-900 bg-white/80 rounded-full w-5 h-5 flex items-center justify-center">✓</span>}
-                                                                </div>
-                                                                <div className="min-w-0 flex-1">
-                                                                    <div className="flex items-center justify-between gap-1">
-                                                                        <span className="font-mono font-black text-xs text-indigo-700 dark:text-indigo-300 dir-ltr">
-                                                                            {swatch.code}
-                                                                        </span>
-                                                                        <span className="text-[9px] font-bold text-slate-400 truncate dir-ltr">
-                                                                            {swatch.nameEn}
-                                                                        </span>
+                                                                    <SmartMediaImg
+                                                                        src={sp.imageUrl}
+                                                                        alt=""
+                                                                        className="w-12 h-12 rounded-xl object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                                                                        fallbackIcon={sp.icon || '🪣'}
+                                                                        fallbackClassName="w-12 h-12 rounded-xl bg-indigo-100 dark:bg-slate-700 flex items-center justify-center text-2xl shrink-0"
+                                                                    />
+                                                                    <div className="min-w-0 flex-1">
+                                                                        <p className="font-black text-xs text-slate-800 dark:text-white leading-snug">
+                                                                            {sp.name}
+                                                                        </p>
+                                                                        <div className="flex items-center justify-between gap-2 mt-1 flex-wrap">
+                                                                            <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400">
+                                                                                {sp.brand ? `${sp.brand} • ` : ''}{sp.unit || 'دبة / سطل'}
+                                                                            </span>
+                                                                            <span className="text-[11px] font-black text-emerald-600 dark:text-emerald-400 dir-ltr">
+                                                                                {spPrice > 0 ? `${spPrice.toLocaleString('en-US')} د.ع` : 'حسب التسعير'}
+                                                                            </span>
+                                                                        </div>
                                                                     </div>
-                                                                    <p className="text-[10px] font-black text-slate-700 dark:text-slate-200 truncate mt-0.5">
-                                                                        {swatch.nameAr}
-                                                                    </p>
-                                                                </div>
-                                                            </button>
-                                                        );
-                                                    })}
+                                                                    <div className={`w-6 h-6 rounded-full border-2 shrink-0 flex items-center justify-center text-xs font-black ${
+                                                                        isSelProd
+                                                                            ? 'bg-fuchsia-600 border-fuchsia-600 text-white'
+                                                                            : 'border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900'
+                                                                    }`}>
+                                                                        {isSelProd ? '✓' : ''}
+                                                                    </div>
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                ) : allShowroomProds.length > 0 ? (
+                                                    <div className="p-4 text-center rounded-2xl bg-white dark:bg-slate-800 border border-dashed border-slate-300 dark:border-slate-700">
+                                                        <p className="text-xs font-black text-slate-500">لا توجد منتجات مطابقة للبحث</p>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setPaintPickerState(prev => ({ ...prev, productSearchQ: '', showAllStoreProducts: true }))}
+                                                            className="mt-2 px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-300 text-[10px] font-black"
+                                                        >
+                                                            عرض جميع منتجات المعرض ({allShowroomProds.length})
+                                                        </button>
+                                                    </div>
+                                                ) : (
+                                                    /* Showroom has 0 listed products in DB -> let contractor specify exact product name explicitly */
+                                                    <div className="p-3.5 rounded-2xl bg-amber-50/80 dark:bg-slate-800 border border-amber-300 dark:border-slate-600 space-y-2">
+                                                        <p className="text-xs font-black text-amber-800 dark:text-amber-300">
+                                                            ⚠️ هذا المعرض لم يُضف قائمة منتجات مسعّرة بعد
+                                                        </p>
+                                                        <p className="text-[10px] font-bold text-slate-600 dark:text-slate-300">
+                                                            اكتب اسم ونوع المنتج المطلوب تلوينه بهذا اللون ليصل واضحاً للمعرض:
+                                                        </p>
+                                                        <input
+                                                            type="text"
+                                                            value={paintPickerState.customProductName}
+                                                            onChange={e => setPaintPickerState(prev => ({ ...prev, customProductName: e.target.value }))}
+                                                            placeholder={`مثال: صبغ ${activeBrand.shortAr} فينوماستيك 18 لتر أو جوتاشيلد خارجي...`}
+                                                            className="w-full p-2.5 bg-white dark:bg-slate-900 border border-amber-300 dark:border-slate-600 rounded-xl text-xs font-black outline-none"
+                                                        />
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* Sheen / Finish Selector (درجة اللمعة) */}
+                                            <div className="space-y-1.5">
+                                                <label className="text-[11px] font-black text-slate-600 dark:text-slate-300 block">
+                                                    ✨ درجة اللمعة / نوع التشطيب:
+                                                </label>
+                                                <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1">
+                                                    {PAINT_FINISH_OPTIONS.map(fin => (
+                                                        <button
+                                                            key={fin.id}
+                                                            type="button"
+                                                            onClick={() => {
+                                                                haptic();
+                                                                setPaintPickerState(prev => ({ ...prev, finishId: fin.id }));
+                                                            }}
+                                                            className={`shrink-0 px-3 py-2 rounded-xl text-[10px] font-black border transition-all ${
+                                                                paintPickerState.finishId === fin.id
+                                                                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                                                                    : 'bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                                                            }`}
+                                                        >
+                                                            {fin.labelAr}
+                                                        </button>
+                                                    ))}
                                                 </div>
                                             </div>
-                                        ) : (
-                                            /* Betek & National: Brand Name Only (manual code or plain white) */
-                                            <div className="bg-amber-50/70 dark:bg-slate-900 p-3.5 rounded-2xl border border-amber-200 dark:border-slate-700 space-y-2.5">
-                                                <div className="flex items-center justify-between">
-                                                    <span className={`text-xs px-2.5 py-1 rounded-xl font-black border ${activeBrand.badgeClass}`}>
-                                                        🏷️ {activeBrand.nameAr}
+
+                                            {/* Quantity & Final Confirmation */}
+                                            <div className="pt-2 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between gap-3">
+                                                <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-900 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-700 shrink-0">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            haptic();
+                                                            setPaintPickerState(prev => ({ ...prev, qty: Math.max(1, (prev.qty || 1) - 1) }));
+                                                        }}
+                                                        className="w-8 h-8 rounded-xl bg-white dark:bg-slate-800 font-black text-base shadow-2xs"
+                                                    >
+                                                        -
+                                                    </button>
+                                                    <span className="px-2 font-black text-sm text-indigo-600 dark:text-indigo-400 min-w-[28px] text-center">
+                                                        {paintPickerState.qty || 1}
                                                     </span>
-                                                    <span className="text-[10px] font-bold text-slate-500">
-                                                        معتمدة كاسم شركة (بدون مسطرة مسبقة حالياً)
-                                                    </span>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            haptic();
+                                                            setPaintPickerState(prev => ({ ...prev, qty: (prev.qty || 1) + 1 }));
+                                                        }}
+                                                        className="w-8 h-8 rounded-xl bg-indigo-600 text-white font-black text-base shadow-2xs"
+                                                    >
+                                                        +
+                                                    </button>
                                                 </div>
-                                                <input
-                                                    type="text"
-                                                    value={paintPickerState.customCode}
-                                                    onChange={e => setPaintPickerState(prev => ({ ...prev, customCode: e.target.value, isPlainWhite: false }))}
-                                                    placeholder={`اكتب رقم الكود أو اسم اللون لشركة ${activeBrand.shortAr} (أو اختر أبيض سادة أعلاه)...`}
-                                                    className="w-full p-3 bg-white dark:bg-slate-800 border border-amber-300 dark:border-slate-600 rounded-xl text-xs font-black outline-none text-center"
-                                                />
+
+                                                {(() => {
+                                                    const hasCustomProdFallback = allShowroomProds.length === 0 && Boolean(String(paintPickerState.customProductName || '').trim());
+                                                    const readyToAdd = Boolean(prod || hasCustomProdFallback);
+                                                    return (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => confirmAddPaintWithColor()}
+                                                            className={`flex-1 py-3.5 px-3 rounded-2xl font-black text-xs flex items-center justify-center gap-2 transition-all active:scale-95 ${
+                                                                readyToAdd
+                                                                    ? 'bg-gradient-to-r from-fuchsia-600 to-indigo-600 text-white shadow-lg shadow-indigo-600/25'
+                                                                    : 'bg-slate-200 dark:bg-slate-800 text-slate-500'
+                                                            }`}
+                                                        >
+                                                            <Icon name="check" size={16} />
+                                                            <span className="truncate">
+                                                                {prod
+                                                                    ? (unitPrice > 0
+                                                                        ? `إضافة «${prod.name.slice(0, 18)}${prod.name.length > 18 ? '…' : ''}» (${lineTotal.toLocaleString('en-US')} د.ع) ✓`
+                                                                        : `إضافة «${prod.name.slice(0, 22)}${prod.name.length > 22 ? '…' : ''}» للسلة ✓`)
+                                                                    : (hasCustomProdFallback
+                                                                        ? 'اعتماد اللون والمنتج وإضافة للسلة ✓'
+                                                                        : 'اختر المنتج أعلاه لتطبيق اللون عليه 🪣')}
+                                                            </span>
+                                                        </button>
+                                                    );
+                                                })()}
                                             </div>
-                                        )
+                                        </div>
                                     )}
-
-                                    {/* Sheen / Finish Selector (درجة اللمعة) */}
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-slate-600 dark:text-slate-300 block">
-                                            ✨ درجة اللمعة / نوع التشطيب:
-                                        </label>
-                                        <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1">
-                                            {PAINT_FINISH_OPTIONS.map(fin => (
-                                                <button
-                                                    key={fin.id}
-                                                    type="button"
-                                                    onClick={() => {
-                                                        haptic();
-                                                        setPaintPickerState(prev => ({ ...prev, finishId: fin.id }));
-                                                    }}
-                                                    className={`shrink-0 px-3 py-2 rounded-xl text-[10px] font-black border transition-all ${
-                                                        paintPickerState.finishId === fin.id
-                                                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
-                                                            : 'bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                                                    }`}
-                                                >
-                                                    {fin.labelAr}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </div>
-
-                                    {/* Quantity & Confirm Button */}
-                                    <div className="pt-2 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between gap-3">
-                                        <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-900 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-700 shrink-0">
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    haptic();
-                                                    setPaintPickerState(prev => ({ ...prev, qty: Math.max(1, (prev.qty || 1) - 1) }));
-                                                }}
-                                                className="w-8 h-8 rounded-xl bg-white dark:bg-slate-800 font-black text-base shadow-2xs"
-                                            >
-                                                -
-                                            </button>
-                                            <span className="px-2 font-black text-sm text-indigo-600 dark:text-indigo-400 min-w-[28px] text-center">
-                                                {paintPickerState.qty || 1}
-                                            </span>
-                                            <button
-                                                type="button"
-                                                onClick={() => {
-                                                    haptic();
-                                                    setPaintPickerState(prev => ({ ...prev, qty: (prev.qty || 1) + 1 }));
-                                                }}
-                                                className="w-8 h-8 rounded-xl bg-indigo-600 text-white font-black text-base shadow-2xs"
-                                            >
-                                                +
-                                            </button>
-                                        </div>
-
-                                        <button
-                                            type="button"
-                                            onClick={confirmAddPaintWithColor}
-                                            className="flex-1 py-3.5 px-4 bg-gradient-to-r from-fuchsia-600 to-indigo-600 text-white rounded-2xl font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/25 active:scale-95"
-                                        >
-                                            <Icon name="check" size={16} />
-                                            <span>
-                                                اعتماد الكود وإضافة ({lineTotal.toLocaleString('en-US')} د.ع) ✓
-                                            </span>
-                                        </button>
-                                    </div>
                                 </div>
                             );
                         })()}
