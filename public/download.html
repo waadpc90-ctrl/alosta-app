@@ -12,7 +12,7 @@
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon.png" />
     <link rel="manifest" href="./manifest.json" />
-    <script src="./vendor/tailwindcss.js"></script>
+    <link rel="stylesheet" href="./vendor/app-tailwind.css?v=v1_0_19" />
     <script src="./vendor/qrious.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@600;700;800;900&display=swap');
@@ -49,7 +49,7 @@
     <div class="w-full max-w-4xl text-center space-y-2 mb-6">
         <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-amber-400/15 border border-amber-400/30 text-amber-300 text-xs font-black">
             <span>📲</span>
-            <span>نظام التحميل الذكي المباشر — الإصدار v1.0.16</span>
+            <span>نظام التحميل الذكي المباشر — الإصدار v1.0.19</span>
         </div>
         <h1 class="text-2xl sm:text-4xl font-black tracking-tight text-white">
             باركود تنزيل تطبيق «الأسطة»
@@ -59,18 +59,45 @@
         </p>
     </div>
 
+    <!-- Combined ZIP Banner for Both APKs (Main App + Dashboard) -->
+    <div class="w-full max-w-4xl mb-3 no-print">
+        <a id="direct-bundle-zip-btn" href="./AlOsta_All_APKs.zip" download="AlOsta_All_APKs.zip"
+           class="flex items-center justify-between p-4 rounded-2xl bg-gradient-to-l from-fuchsia-600 via-purple-600 to-indigo-600 hover:from-fuchsia-500 hover:to-indigo-500 text-white shadow-2xl border border-fuchsia-400/40 active:scale-95 transition-all">
+            <div class="flex items-center gap-3">
+                <span class="text-3xl">📦</span>
+                <div class="text-right">
+                    <div class="font-black text-sm sm:text-base">تنزيل الملف المضغوط الشامل (التطبيق الرئيسي + الداشبورد معاً)</div>
+                    <div class="text-[11px] font-bold text-fuchsia-100">AlOsta_All_APKs.zip • يحتوي على AlOsta_App.apk + AlOsta_Dashboard.apk</div>
+                </div>
+            </div>
+            <span class="px-3.5 py-2 rounded-xl bg-white text-purple-950 text-xs font-black shrink-0">تنزيل ZIP ⬇</span>
+        </a>
+    </div>
+
     <!-- Direct Action Buttons for Current Device -->
-    <div class="w-full max-w-4xl grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6 no-print">
+    <div class="w-full max-w-4xl grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6 no-print">
         <a id="direct-android-btn" href="./AlOsta_App.apk" download="AlOsta_App.apk"
            class="flex items-center justify-between p-4 rounded-2xl bg-gradient-to-l from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-xl border border-emerald-400/30 active:scale-95 transition-all">
             <div class="flex items-center gap-3">
                 <span class="text-3xl">🤖</span>
                 <div class="text-right">
-                    <div class="font-black text-sm sm:text-base">تنزيل مباشر للأندرويد (APK)</div>
+                    <div class="font-black text-sm sm:text-base">تنزيل تطبيق الأسطة (APK)</div>
                     <div class="text-[11px] font-bold text-emerald-100">AlOsta_App.apk • تثبيت فوري مباشر</div>
                 </div>
             </div>
             <span class="px-3 py-1.5 rounded-xl bg-white/20 text-xs font-black">تنزيل ⬇</span>
+        </a>
+
+        <a id="direct-dashboard-apk-btn" href="./AlOsta_Dashboard.apk" download="AlOsta_Dashboard.apk"
+           class="flex items-center justify-between p-4 rounded-2xl bg-gradient-to-l from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 shadow-xl border border-amber-300/40 active:scale-95 transition-all">
+            <div class="flex items-center gap-3">
+                <span class="text-3xl">👑</span>
+                <div class="text-right">
+                    <div class="font-black text-sm sm:text-base">تنزيل داشبورد الإدارة (APK)</div>
+                    <div class="text-[11px] font-bold text-slate-900">AlOsta_Dashboard.apk • إدارة المقاولين والعمال</div>
+                </div>
+            </div>
+            <span class="px-3 py-1.5 rounded-xl bg-slate-950 text-amber-300 text-xs font-black">تنزيل ⬇</span>
         </a>
 
         <a id="direct-ios-btn" href="./index.html"
@@ -99,7 +126,7 @@
             </button>
             <button id="mode-github-btn" onclick="setQrBaseMode('github')"
                     class="flex-1 sm:flex-initial px-3.5 py-2 rounded-xl text-xs font-black bg-slate-800 text-slate-300 border border-slate-700 transition-all">
-                🌐 رابط GitHub الدائم (alustadh)
+                🌐 رابط GitHub الدائم (alosta-app)
             </button>
             <button onclick="window.print()"
                     class="px-3.5 py-2 rounded-xl text-xs font-black bg-indigo-600 text-white shadow-sm">
@@ -207,8 +234,8 @@
     </div>
 
     <script>
-        const GITHUB_BASE = 'https://waadpc90-ctrl.github.io/alustadh/';
-        const GITHUB_RAW_APK = 'https://github.com/waadpc90-ctrl/alustadh/raw/main/AlOsta_App.apk';
+        const GITHUB_BASE = 'https://waadpc90-ctrl.github.io/alosta-app/';
+        const GITHUB_RAW_APK = 'https://waadpc90-ctrl.github.io/alosta-app/AlOsta_App.apk';
 
         let activeMode = 'current';
         let currentUrls = { smart: '', android: '', ios: '' };
@@ -305,7 +332,7 @@
 
             ctx.fillStyle = '#475569';
             ctx.font = 'bold 16px Cairo, sans-serif';
-            ctx.fillText('امسح الباركود بكاميرا الهاتف للتنزيل المباشر • v1.0.16', out.width / 2, 555);
+            ctx.fillText('امسح الباركود بكاميرا الهاتف للتنزيل المباشر • v1.0.19', out.width / 2, 555);
 
             const link = document.createElement('a');
             link.download = fileName;

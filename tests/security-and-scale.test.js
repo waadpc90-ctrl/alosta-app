@@ -248,7 +248,7 @@ test('6. Portal server, Kotlin modularization, telemetry isolation, pagination, 
     // Portal server checks
     const serverSrc = fs.readFileSync(path.join(ROOT, 'portal-server.js'), 'utf8');
     assert.ok(serverSrc.includes("const PORTAL_VERSION = '1.0.19'"), 'portal-server.js must be v1.0.19');
-    assert.ok(serverSrc.includes('waadpc90-ctrl/alustadh'), 'portal-server.js must point to alustadh repo');
+    assert.ok(serverSrc.includes('waadpc90-ctrl.github.io/alosta-app'), 'portal-server.js must point to active alosta-app GitHub Pages repo');
     assert.ok(serverSrc.includes('FIREBASE_ADMIN_TOKEN'), 'portal-server.js must gate Firestore PATCH with admin token');
     assert.ok(!serverSrc.includes("'Access-Control-Allow-Origin': '*'"), 'Wildcard CORS must be removed from portal-server.js');
 

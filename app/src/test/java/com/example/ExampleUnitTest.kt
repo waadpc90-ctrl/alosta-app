@@ -82,16 +82,16 @@ class ExampleUnitTest {
     @Test
     fun apkUpdater_supportsGithubBlobRawLfsDropboxMediafireAndSpaces() {
         assertEquals(
-            "https://raw.githubusercontent.com/waadpc90-ctrl/alustadh/main/AlOsta_App.apk",
-            AlOstaApkUpdater.toDirectDownloadUrl("https://github.com/waadpc90-ctrl/alustadh/blob/main/AlOsta_App.apk")
+            "https://raw.githubusercontent.com/waadpc90-ctrl/alosta-app/main/AlOsta_App.apk",
+            AlOstaApkUpdater.toDirectDownloadUrl("https://github.com/waadpc90-ctrl/alosta-app/blob/main/AlOsta_App.apk")
         )
         assertEquals(
-            "https://raw.githubusercontent.com/waadpc90-ctrl/alustadh/main/AlOsta_App.apk",
-            AlOstaApkUpdater.toDirectDownloadUrl("https://github.com/waadpc90-ctrl/alustadh/raw/main/AlOsta_App.apk")
+            "https://raw.githubusercontent.com/waadpc90-ctrl/alosta-app/main/AlOsta_App.apk",
+            AlOstaApkUpdater.toDirectDownloadUrl("https://github.com/waadpc90-ctrl/alosta-app/raw/main/AlOsta_App.apk")
         )
         assertEquals(
-            "https://media.githubusercontent.com/media/waadpc90-ctrl/alustadh/main/AlOsta_App.apk",
-            AlOstaApkUpdater.toGitHubLfsMediaUrl("https://raw.githubusercontent.com/waadpc90-ctrl/alustadh/main/AlOsta_App.apk")
+            "https://media.githubusercontent.com/media/waadpc90-ctrl/alosta-app/main/AlOsta_App.apk",
+            AlOstaApkUpdater.toGitHubLfsMediaUrl("https://raw.githubusercontent.com/waadpc90-ctrl/alosta-app/main/AlOsta_App.apk")
         )
         assertEquals(
             "https://www.dropbox.com/scl/fi/abc/AlOsta_App.apk?rlkey=xyz&dl=1",
@@ -102,10 +102,10 @@ class ExampleUnitTest {
             AlOstaApkUpdater.parseMediaFireDownloadUrl("""<a id="downloadButton" href="https://download1234.mediafire.com/abc/AlOsta_App.apk">Download</a>""")
         )
         assertEquals(
-            "https://waadpc90-ctrl.github.io/alustadh/AlOsta_App.apk",
+            "https://waadpc90-ctrl.github.io/alosta-app/AlOsta_App.apk",
             AlOstaApkUpdater.parseHtmlDirectApkLink(
                 """<a href="./AlOsta_App.apk">Download</a>""",
-                "https://waadpc90-ctrl.github.io/alustadh/download.html"
+                "https://waadpc90-ctrl.github.io/alosta-app/download.html"
             )
         )
         assertTrue(AlOstaSecurityVault.isSafeExternalHttpUrl("https://example.com/AlOsta App v1.0.19.apk"))

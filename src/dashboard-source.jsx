@@ -535,7 +535,7 @@
         const getStorePortalLink = (storeObj, portalBaseUrl = '') => {
             if (!storeObj) return '';
             const code = getStorePortalCode(storeObj);
-            let base = String(portalBaseUrl || 'https://waadpc90-ctrl.github.io/alustadh/').trim();
+            let base = String(portalBaseUrl || 'https://waadpc90-ctrl.github.io/alosta-app/').trim();
             if (!base.endsWith('/')) base += '/';
             return `${base}dashboard.html?storePortal=${encodeURIComponent(storeObj.id)}&code=${encodeURIComponent(code)}`;
         };
@@ -2629,7 +2629,7 @@
                 latestVersion: APP_VERSION,
                 apkUrl: '',
                 rawApkUrl: '',
-                portalBaseUrl: 'https://waadpc90-ctrl.github.io/alustadh/',
+                portalBaseUrl: 'https://waadpc90-ctrl.github.io/alosta-app/',
                 forceUpdate: false,
                 stopUpdate: false,
                 maintenanceMode: false,
@@ -3434,7 +3434,7 @@
                 const cleanVersion = String(appConfig.latestVersion ?? '').trim();
                 const rawApkInput = String(appConfig.apkUrl ?? '').trim();
                 const cleanApkUrl = normalizeDashboardApkUrl(rawApkInput);
-                const cleanPortalUrl = String(appConfig.portalBaseUrl ?? '').trim() || 'https://waadpc90-ctrl.github.io/alustadh/';
+                const cleanPortalUrl = String(appConfig.portalBaseUrl ?? '').trim() || 'https://waadpc90-ctrl.github.io/alosta-app/';
 
                 if (!cleanVersion) {
                     setConfigSaveError('يرجى كتابة رقم الإصدار (مثال: 1.0.19) قبل الحفظ.');
@@ -4938,7 +4938,7 @@
                                                 dir="ltr"
                                                 value={appConfig.portalBaseUrl ?? ''}
                                                 onChange={(e) => updateAppConfigFields({ portalBaseUrl: e.target.value })}
-                                                placeholder="https://waadpc90-ctrl.github.io/alustadh/"
+                                                placeholder="https://waadpc90-ctrl.github.io/alosta-app/"
                                                 className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:outline-none text-xs font-mono text-slate-300"
                                             />
                                         </div>
@@ -4948,6 +4948,21 @@
                                         <div className="flex flex-wrap items-center justify-between gap-2">
                                             <label className="text-[11px] font-bold text-slate-400">رابط ملف التحديث المباشر (APK URL)</label>
                                             <div className="flex flex-wrap items-center gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const officialUrl = 'https://waadpc90-ctrl.github.io/alosta-app/AlOsta_App.apk';
+                                                        updateAppConfigFields({
+                                                            apkUrl: officialUrl,
+                                                            rawApkUrl: officialUrl,
+                                                            portalBaseUrl: 'https://waadpc90-ctrl.github.io/alosta-app/'
+                                                        });
+                                                        verifyApkLinkNow(officialUrl);
+                                                    }}
+                                                    className="px-2.5 py-1 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-300 text-[10px] font-black"
+                                                >
+                                                    ⚡ رابط GitHub الرسمي (alosta-app)
+                                                </button>
                                                 <button
                                                     type="button"
                                                     disabled={linkCheckState?.state === 'checking'}
