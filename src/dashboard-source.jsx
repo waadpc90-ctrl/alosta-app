@@ -2627,8 +2627,8 @@
             const [announcements, setAnnouncements] = useState([]);
             const [appConfig, setAppConfig] = useState({
                 latestVersion: APP_VERSION,
-                apkUrl: 'https://github.com/waadpc90-ctrl/alustadh/raw/main/AlOsta_App.apk',
-                rawApkUrl: 'https://github.com/waadpc90-ctrl/alustadh/raw/main/AlOsta_App.apk',
+                apkUrl: '',
+                rawApkUrl: '',
                 portalBaseUrl: 'https://waadpc90-ctrl.github.io/alustadh/',
                 forceUpdate: false,
                 stopUpdate: false,
@@ -2652,13 +2652,125 @@
             const [cloudAppConfig, setCloudAppConfig] = useState(null);
             const [isConfigDirty, setIsConfigDirty] = useState(false);
             const [configSaveError, setConfigSaveError] = useState('');
+            const [linkCheckState, setLinkCheckState] = useState(null); // { state: 'checking'|'ok'|'error'|'warn', url, statusCode, message, resolvedUrl, checkedAt }
             const appConfigDirtyRef = useRef(false);
+
+            const normalizeDashboardApkUrl = (raw) => {
+                let u = String(raw || '').trim();
+                if (!u) return '';
+                if (!/^https?:\/\//i.test(u) && u.includes('.') && !u.includes('://')) {
+                    u = 'https://' + u;
+                }
+                const ghMatch = u.match(/^https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s]+)\/(?:blob|raw)\/([^/\s]+)\/(.+)$/i);
+                if (ghMatch) {
+                    const cleanPath = ghMatch[4].split('?')[0].split('#')[0];
+                    return `https://raw.githubusercontent.com/${ghMatch[1]}/${ghMatch[2]}/${ghMatch[3]}/${cleanPath}`;
+                }
+                if (/dropbox\.com/i.test(u)) {
+                    if (/[?&]dl=0\b/i.test(u)) return u.replace(/([?&])dl=0\b/i, '$1dl=1');
+                    if (/[?&]dl=1\b/i.test(u)) return u;
+                    return u + (u.includes('?') ? '&dl=1' : '?dl=1');
+                }
+                return u;
+            };
 
             const updateAppConfigFields = (patch) => {
                 appConfigDirtyRef.current = true;
                 setIsConfigDirty(true);
                 setConfigSaveError('');
+                if (Object.prototype.hasOwnProperty.call(patch, 'apkUrl')) {
+                    setLinkCheckState(null);
+                }
                 setAppConfig((prev) => ({ ...prev, ...patch }));
+            };
+
+            const verifyApkLinkNow = async (rawInputUrl) => {
+                const candidate = normalizeDashboardApkUrl(rawInputUrl ?? appConfig.apkUrl ?? '');
+                if (!candidate) {
+                    const res = { state: 'error', url: '', statusCode: 0, message: '⚠️ يرجى إدخال رابط ملف الـ APK أولاً قبل الفحص.' };
+                    setLinkCheckState(res);
+                    return res;
+                }
+                if (!/^https?:\/\/[^/\s]+/i.test(candidate)) {
+                    const res = { state: 'error', url: candidate, statusCode: 0, message: '⛔ صيغة الرابط غير صحيحة — يجب أن يبدأ بـ https://' };
+                    setLinkCheckState(res);
+                    return res;
+                }
+                setLinkCheckState({ state: 'checking', url: candidate, statusCode: 0, message: 'جاري فحص الرابط والتحقق من وجود ملف الـ APK...' });
+
+                // 1) Native Android Dashboard APK check (exact HTTP status + PK\x03\x04 magic bytes + size, zero CORS limits)
+                if (window.AndroidApp && typeof window.AndroidApp.verifyUpdateApkUrl === 'function') {
+                    try {
+                        const rawJson = await new Promise((resolve) => {
+                            setTimeout(() => {
+                                try {
+                                    resolve(window.AndroidApp.verifyUpdateApkUrl(candidate));
+                                } catch (e) {
+                                    resolve(JSON.stringify({ ok: false, statusCode: 0, message: 'تعذر الفحص: ' + (e.message || '') }));
+                                }
+                            }, 30);
+                        });
+                        const parsed = JSON.parse(rawJson || '{}');
+                        const out = {
+                            state: parsed.ok ? 'ok' : 'error',
+                            url: candidate,
+                            statusCode: Number(parsed.statusCode || 0),
+                            resolvedUrl: parsed.resolvedUrl || candidate,
+                            message: parsed.message || (parsed.ok ? '✓ الرابط شغّال ومؤكد' : '⛔ الرابط لا يعمل'),
+                            checkedAt: new Date().toLocaleTimeString('ar-IQ')
+                        };
+                        setLinkCheckState(out);
+                        return out;
+                    } catch (e) {
+                        const out = { state: 'error', url: candidate, statusCode: 0, message: '⛔ تعذر فحص الرابط: ' + (e.message || '') };
+                        setLinkCheckState(out);
+                        return out;
+                    }
+                }
+
+                // 2) Web Browser Dashboard check (HEAD/Range GET on CORS-enabled hosts like GitHub raw / direct servers)
+                try {
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), 9000);
+                    const resp = await fetch(candidate, { method: 'HEAD', mode: 'cors', signal: controller.signal });
+                    clearTimeout(timer);
+                    if (resp.status === 404 || resp.status === 410) {
+                        const out = { state: 'error', url: candidate, statusCode: resp.status, message: `⛔ الملف غير موجود على هذا الرابط (خطأ ${resp.status})! تأكد من رفع AlOsta_App.apk وتصحيح الرابط.`, checkedAt: new Date().toLocaleTimeString('ar-IQ') };
+                        setLinkCheckState(out);
+                        return out;
+                    }
+                    if (resp.status === 401 || resp.status === 403) {
+                        const out = { state: 'error', url: candidate, statusCode: resp.status, message: `⛔ الرابط خاص أو محمي (خطأ ${resp.status})! اجعله عاماً للجميع.`, checkedAt: new Date().toLocaleTimeString('ar-IQ') };
+                        setLinkCheckState(out);
+                        return out;
+                    }
+                    if (!resp.ok) {
+                        const out = { state: 'error', url: candidate, statusCode: resp.status, message: `⛔ الخادم أعاد خطأ (${resp.status}) عند فحص الرابط.`, checkedAt: new Date().toLocaleTimeString('ar-IQ') };
+                        setLinkCheckState(out);
+                        return out;
+                    }
+                    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+                    const cl = Number(resp.headers.get('content-length') || 0);
+                    if (ct.includes('text/html')) {
+                        const out = { state: 'error', url: candidate, statusCode: resp.status, message: '⛔ الرابط يفتح صفحة ويب (HTML) وليس ملف APK مباشر!', checkedAt: new Date().toLocaleTimeString('ar-IQ') };
+                        setLinkCheckState(out);
+                        return out;
+                    }
+                    const mbStr = cl > 0 ? ` (${(cl / (1024 * 1024)).toFixed(1)} MB)` : '';
+                    const out = { state: 'ok', url: candidate, statusCode: resp.status, resolvedUrl: resp.url || candidate, message: `✓ الرابط شغّال ومؤكد وموجود على الخادم${mbStr}!`, checkedAt: new Date().toLocaleTimeString('ar-IQ') };
+                    setLinkCheckState(out);
+                    return out;
+                } catch (err) {
+                    const out = {
+                        state: 'warn',
+                        url: candidate,
+                        statusCode: 0,
+                        message: '⚠️ تعذر الفحص التلقائي من المتصفح (قيود CORS للمضيف مثل كوكل درايف). اضغط «🌐 فتح للتجربة» أو استخدم تطبيق الداشبورد للفحص المباشر.',
+                        checkedAt: new Date().toLocaleTimeString('ar-IQ')
+                    };
+                    setLinkCheckState(out);
+                    return out;
+                }
             };
 
             const bumpPatchVersion = () => {
@@ -3320,7 +3432,8 @@
             const handleSaveAppConfig = async (e, pushMode = 'save') => {
                 if (e && e.preventDefault) e.preventDefault();
                 const cleanVersion = String(appConfig.latestVersion ?? '').trim();
-                const cleanApkUrl = String(appConfig.apkUrl ?? '').trim();
+                const rawApkInput = String(appConfig.apkUrl ?? '').trim();
+                const cleanApkUrl = normalizeDashboardApkUrl(rawApkInput);
                 const cleanPortalUrl = String(appConfig.portalBaseUrl ?? '').trim() || 'https://waadpc90-ctrl.github.io/alustadh/';
 
                 if (!cleanVersion) {
@@ -3333,14 +3446,31 @@
                     addToast('⚠️ يرجى إدخال رابط ملف التحديث (APK URL) أولاً', 'error');
                     return;
                 }
+                if (cleanApkUrl && !/^https?:\/\/[^/\s]+/i.test(cleanApkUrl)) {
+                    setConfigSaveError('⛔ رابط التحديث غير صالح — يجب أن يبدأ بـ https://');
+                    addToast('⛔ رابط التحديث غير صالح', 'error');
+                    return;
+                }
 
                 setSavingId('app_config');
                 setConfigSaveError('');
                 try {
+                    // Pre-push live link check so a broken 404/private link is never pushed to user phones
+                    if (pushMode === 'push' && cleanApkUrl) {
+                        const alreadyOk = linkCheckState && linkCheckState.state === 'ok' && linkCheckState.url === cleanApkUrl;
+                        const checkRes = alreadyOk ? linkCheckState : await verifyApkLinkNow(cleanApkUrl);
+                        if (checkRes && checkRes.state === 'error') {
+                            setConfigSaveError('⛔ تم إيقاف إرسال التحديث لجميع الأجهزة لأن الرابط لا يعمل: ' + checkRes.message);
+                            addToast('⛔ تم إيقاف الإرسال — رابط التحديث يعطي خطأ (تحقق من الرابط أولاً)', 'error');
+                            setSavingId('');
+                            return;
+                        }
+                    }
+
                     const payload = {
                         latestVersion: cleanVersion,
                         apkUrl: cleanApkUrl,
-                        rawApkUrl: cleanApkUrl,
+                        rawApkUrl: rawApkInput || cleanApkUrl,
                         portalBaseUrl: cleanPortalUrl,
                         forceUpdate: pushMode === 'stop' ? false : Boolean(appConfig.forceUpdate),
                         stopUpdate: pushMode === 'stop' ? true : (pushMode === 'push' ? false : Boolean(appConfig.stopUpdate)),
@@ -3372,19 +3502,46 @@
                         payload.forceUpdate = false;
                     }
 
-                    await db.collection('settings').doc('app_config').set(payload, { merge: true });
+                    const cfgRef = db.collection('settings').doc('app_config');
+                    await cfgRef.set(payload, { merge: true });
+
+                    // Mandatory server read-back confirmation to prove the exact new URL & version were saved
+                    let confirmedData = payload;
+                    try {
+                        const serverSnap = await cfgRef.get({ source: 'server' }).catch(() => cfgRef.get());
+                        if (serverSnap && serverSnap.exists) {
+                            const sData = serverSnap.data() || {};
+                            const savedUrl = String(sData.apkUrl || sData.rawApkUrl || '').trim();
+                            const savedVer = String(sData.latestVersion || '').trim();
+                            if (savedVer !== cleanVersion || savedUrl !== cleanApkUrl) {
+                                throw new Error('لم يطابق السجل المحفوظ في السحابة القيم الجديدة — تحقق من الاتصال وصلاحيات Firestore.');
+                            }
+                            confirmedData = {
+                                ...payload,
+                                ...sData,
+                                latestVersion: savedVer,
+                                apkUrl: savedUrl,
+                                rawApkUrl: savedUrl,
+                                verifiedFromCloud: true
+                            };
+                        }
+                    } catch (verifyErr) {
+                        if (verifyErr && verifyErr.message && verifyErr.message.includes('لم يطابق')) {
+                            throw verifyErr;
+                        }
+                    }
 
                     appConfigDirtyRef.current = false;
                     setIsConfigDirty(false);
-                    setAppConfig((prev) => ({ ...prev, ...payload }));
-                    setCloudAppConfig((prev) => ({ ...(prev || {}), ...payload }));
+                    setAppConfig((prev) => ({ ...prev, ...confirmedData }));
+                    setCloudAppConfig((prev) => ({ ...(prev || {}), ...confirmedData }));
 
                     if (pushMode === 'push') {
-                        addToast(`🚀 تم تحديث الإصدار (v${payload.latestVersion}) ورابط التحديث وإرسال إشعار فوري لجميع الأجهزة!`);
+                        addToast(`🚀 تم التحقق والحفظ في السحابة (v${confirmedData.latestVersion}) وإرسال إشعار التحديث لجميع الأجهزة ✓`);
                     } else if (pushMode === 'stop') {
-                        addToast(`⏹️ تم إيقاف إشعار التحديث الفوري وحفظ الإعدادات (v${payload.latestVersion}) بنجاح.`);
+                        addToast(`⏹️ تم إيقاف إشعار التحديث الفوري وحفظ الإعدادات (v${confirmedData.latestVersion}) بنجاح.`);
                     } else {
-                        addToast(`✓ تم حفظ رقم الإصدار (v${payload.latestVersion}) ورابط التحديث وإعدادات النظام في السحابة بنجاح!`);
+                        addToast(`✓ تم حفظ وتأكيد رقم الإصدار (v${confirmedData.latestVersion}) ورابط التحديث في السحابة بنجاح!`);
                     }
                 } catch (err) {
                     const msg = (err && err.message) ? err.message : 'تحقق من اتصال الإنترنت وقواعد Firestore';
@@ -4787,27 +4944,76 @@
                                         </div>
                                     </div>
 
-                                    <div>
-                                        <div className="flex items-center justify-between gap-2 mb-1">
+                                    <div className="space-y-2">
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
                                             <label className="text-[11px] font-bold text-slate-400">رابط ملف التحديث المباشر (APK URL)</label>
-                                            {appConfig.apkUrl && (
+                                            <div className="flex flex-wrap items-center gap-2">
                                                 <button
                                                     type="button"
-                                                    onClick={() => updateAppConfigFields({ apkUrl: '', rawApkUrl: '' })}
-                                                    className="text-[10px] font-black text-rose-400"
+                                                    disabled={linkCheckState?.state === 'checking'}
+                                                    onClick={() => verifyApkLinkNow(appConfig.apkUrl)}
+                                                    className="px-2.5 py-1 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 border border-sky-400/40 text-sky-300 text-[10px] font-black"
                                                 >
-                                                    مسح الرابط ✕
+                                                    {linkCheckState?.state === 'checking' ? '⏳ جاري الفحص...' : '🔍 فحص وتأكيد الرابط'}
                                                 </button>
-                                            )}
+                                                {appConfig.apkUrl && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            const target = normalizeDashboardApkUrl(appConfig.apkUrl);
+                                                            if (window.AndroidApp && typeof window.AndroidApp.openExternalUpdateUrl === 'function') {
+                                                                window.AndroidApp.openExternalUpdateUrl(target);
+                                                            } else {
+                                                                window.open(target, '_blank', 'noopener,noreferrer');
+                                                            }
+                                                        }}
+                                                        className="px-2.5 py-1 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-400/40 text-indigo-300 text-[10px] font-black"
+                                                    >
+                                                        🌐 فتح للتجربة
+                                                    </button>
+                                                )}
+                                                {appConfig.apkUrl && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => updateAppConfigFields({ apkUrl: '', rawApkUrl: '' })}
+                                                        className="text-[10px] font-black text-rose-400"
+                                                    >
+                                                        مسح الرابط ✕
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
                                         <input
                                             type="text"
                                             dir="ltr"
                                             value={appConfig.apkUrl ?? ''}
                                             onChange={(e) => updateAppConfigFields({ apkUrl: e.target.value, rawApkUrl: e.target.value })}
-                                            placeholder="https://github.com/.../AlOsta_App.apk"
+                                            placeholder="https://drive.google.com/file/d/... أو https://github.com/.../AlOsta_App.apk"
                                             className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:outline-none text-xs font-mono text-indigo-300"
                                         />
+                                        {linkCheckState && (
+                                            <div className={`p-3 rounded-2xl border text-[11px] font-bold flex flex-col gap-1 ${
+                                                linkCheckState.state === 'ok'
+                                                    ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-200'
+                                                    : linkCheckState.state === 'error'
+                                                    ? 'bg-rose-950/60 border-rose-500/40 text-rose-200'
+                                                    : linkCheckState.state === 'warn'
+                                                    ? 'bg-amber-950/50 border-amber-500/40 text-amber-200'
+                                                    : 'bg-sky-950/50 border-sky-500/40 text-sky-200'
+                                            }`}>
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <span>{linkCheckState.message}</span>
+                                                    {linkCheckState.checkedAt && (
+                                                        <span className="text-[10px] opacity-75 font-mono shrink-0">{linkCheckState.checkedAt}</span>
+                                                    )}
+                                                </div>
+                                                {linkCheckState.resolvedUrl && linkCheckState.resolvedUrl !== appConfig.apkUrl && (
+                                                    <div className="text-[10px] font-mono opacity-80 truncate" dir="ltr">
+                                                        Direct: {linkCheckState.resolvedUrl}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
 
                                     <div className="flex flex-wrap gap-2 pt-1">

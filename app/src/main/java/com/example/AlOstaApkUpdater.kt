@@ -1028,6 +1028,145 @@ object AlOstaApkUpdater {
         }
     }
 
+    /**
+     * Verifies whether an OTA update URL is reachable, returns HTTP 200, and actually serves
+     * a real APK/ZIP binary (PK\x03\x04) rather than a 404/403 error or HTML web page.
+     * Reads only the first 4 bytes (or small HTML snippet for Drive/MediaFire/LFS) without downloading the full APK.
+     */
+    fun verifyApkUrl(rawUrl: String): String {
+        val json = org.json.JSONObject()
+        val cleanUrl = sanitizeInputUrl(rawUrl)
+        if (cleanUrl.isEmpty() || !AlOstaSecurityVault.isSafeExternalHttpUrl(cleanUrl)) {
+            json.put("ok", false)
+            json.put("statusCode", 0)
+            json.put("resolvedUrl", cleanUrl)
+            json.put("message", "⛔ رابط التحديث غير صالح — يجب أن يبدأ بـ https:// ويكون رابطاً خارجياً صحيحاً.")
+            return json.toString()
+        }
+
+        val gdriveFileId = extractGoogleDriveFileId(cleanUrl)
+        val initialUrl = toDirectDownloadUrl(cleanUrl)
+        val scopedCookies = mutableMapOf<String, MutableMap<String, String>>()
+        var conn: HttpURLConnection? = null
+        var input: BufferedInputStream? = null
+
+        try {
+            var res = openConnectionFollowingRedirects(initialUrl, scopedCookies)
+            conn = res.connection
+
+            if (res.statusCode == 404 && initialUrl != cleanUrl) {
+                conn.disconnect()
+                res = openConnectionFollowingRedirects(cleanUrl, scopedCookies)
+                conn = res.connection
+            }
+
+            json.put("statusCode", res.statusCode)
+            json.put("resolvedUrl", res.finalUrl)
+
+            if (res.statusCode == 404 || res.statusCode == 410) {
+                json.put("ok", false)
+                json.put("message", "⛔ الملف غير موجود على هذا الرابط (خطأ ${res.statusCode})! تأكد من رفع AlOsta_App.apk ومن صحة الرابط.")
+                return json.toString()
+            }
+            if (res.statusCode == 401 || res.statusCode == 403) {
+                json.put("ok", false)
+                json.put("message", "⛔ الرابط محمي أو خاص (خطأ ${res.statusCode})! اجعل الملف عاماً للجميع (Public / Anyone with the link).")
+                return json.toString()
+            }
+            if (res.statusCode >= 400) {
+                json.put("ok", false)
+                json.put("message", "⛔ الخادم رفض الرابط (رمز الخطأ ${res.statusCode}).")
+                return json.toString()
+            }
+
+            input = BufferedInputStream(conn.inputStream)
+            input.mark(16384)
+            val firstHeader = readExactBytes(input, 4)
+
+            if (hasZipMagic(firstHeader)) {
+                val sizeBytes = conn.contentLengthLong
+                json.put("ok", true)
+                json.put("isApkOrZip", true)
+                json.put("sizeBytes", sizeBytes)
+                val sizeLabel = if (sizeBytes > 0L) {
+                    String.format(Locale.US, " (%.1f MB)", sizeBytes / (1024.0 * 1024.0))
+                } else ""
+                json.put("message", "✓ الرابط شغّال ومؤكد! يؤدي مباشرة إلى ملف APK/ZIP صالح$sizeLabel")
+                return json.toString()
+            }
+
+            // Inspect HTML/text snippet (Git LFS, Google Drive confirm page, MediaFire, download.html)
+            input.reset()
+            val snippet = ByteArray(131072)
+            var total = 0
+            while (total < snippet.size) {
+                val r = input.read(snippet, total, snippet.size - total)
+                if (r <= 0) break
+                total += r
+            }
+            input.close()
+            conn.disconnect()
+            input = null
+            conn = null
+
+            val textBody = String(snippet, 0, total, Charsets.UTF_8)
+            val followUpUrl = if (textBody.startsWith("version https://git-lfs.github.com/spec/v1")) {
+                toGitHubLfsMediaUrl(res.finalUrl) ?: toGitHubLfsMediaUrl(cleanUrl)
+            } else if (!gdriveFileId.isNullOrBlank()) {
+                parseGoogleDriveConfirmationUrl(textBody, gdriveFileId)
+                    ?: "https://drive.google.com/uc?export=download&id=$gdriveFileId&confirm=t"
+            } else {
+                parseHtmlDirectApkLink(textBody, res.finalUrl)
+            }
+
+            if (followUpUrl != null && AlOstaSecurityVault.isSafeExternalHttpUrl(followUpUrl)) {
+                val secondRes = openConnectionFollowingRedirects(followUpUrl, scopedCookies)
+                conn = secondRes.connection
+                json.put("statusCode", secondRes.statusCode)
+                json.put("resolvedUrl", secondRes.finalUrl)
+
+                if (secondRes.statusCode >= 400) {
+                    json.put("ok", false)
+                    json.put("message", "⛔ تعذر الوصول لملف التحميل المباشر (خطأ ${secondRes.statusCode}).")
+                    return json.toString()
+                }
+                input = BufferedInputStream(conn.inputStream)
+                val secondHeader = readExactBytes(input, 4)
+                if (hasZipMagic(secondHeader)) {
+                    val sizeBytes = conn.contentLengthLong
+                    json.put("ok", true)
+                    json.put("isApkOrZip", true)
+                    json.put("sizeBytes", sizeBytes)
+                    val sizeLabel = if (sizeBytes > 0L) {
+                        String.format(Locale.US, " (%.1f MB)", sizeBytes / (1024.0 * 1024.0))
+                    } else ""
+                    json.put("message", "✓ الرابط شغّال ومؤكد! تم التحقق من ملف التحديث المباشر$sizeLabel")
+                    return json.toString()
+                }
+            }
+
+            json.put("ok", false)
+            json.put("isApkOrZip", false)
+            json.put("message", "⛔ الرابط يفتح صفحة ويب (HTML) وليس ملف APK مباشر! تأكد من صلاحية المشاركة العامة أو استخدم رابط تحميل مباشر.")
+            return json.toString()
+        } catch (e: Exception) {
+            json.put("ok", false)
+            json.put("statusCode", 0)
+            json.put("resolvedUrl", initialUrl)
+            val errMsg = when (e) {
+                is java.io.FileNotFoundException -> "⛔ الملف غير موجود على هذا الرابط (خطأ 404)!"
+                is java.net.UnknownHostException -> "⛔ تعذر الاتصال بالنطاق — تحقق من كتابة الرابط واتصال الإنترنت."
+                is java.net.SocketTimeoutException -> "⚠️ انتهت مهلة الاتصال بالخادم — حاول الفحص مجدداً."
+                else -> "⛔ فشل فحص الرابط: ${e.message ?: "خطأ غير معروف"}"
+            }
+            json.put("message", errMsg)
+            return json.toString()
+        } finally {
+            try { input?.close() } catch (_: Exception) {}
+            try { conn?.disconnect() } catch (_: Exception) {}
+        }
+    }
+
     fun openInExternalBrowser(context: Context, rawUrl: String) {
         val browserUrl = toBrowserFriendlyUrl(rawUrl)
         if (browserUrl.isEmpty() || !AlOstaSecurityVault.isSafeExternalHttpUrl(browserUrl)) return

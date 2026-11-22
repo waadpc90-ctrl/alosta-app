@@ -270,6 +270,14 @@ class AndroidAppBridge(
     }
 
     @JavascriptInterface
+    fun verifyUpdateApkUrl(apkUrl: String?): String {
+        if (!isTrustedCallerOrigin()) {
+            return """{"ok":false,"statusCode":0,"message":"Unauthorized origin"}"""
+        }
+        return AlOstaApkUpdater.verifyApkUrl(apkUrl ?: "")
+    }
+
+    @JavascriptInterface
     fun exportAndShareApk(): String {
         return AlOstaApkUpdater.exportAndShareCurrentApk(context)
     }
