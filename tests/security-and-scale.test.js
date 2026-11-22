@@ -275,3 +275,29 @@ test('6. Portal server, Kotlin modularization, telemetry isolation, pagination, 
     assert.ok(appSrc.includes('FieldValue.delete()'), 'Legacy passwordCipher deletion must be wired');
     assert.ok(appSrc.includes('isDeleteFieldSentinel'), 'Smart DB must strip FieldValue.delete() on non-merge set()');
 });
+
+test('7. High-Capacity Telemetry (Single-Doc Crew Board + Live Radar Lease + Eco/Turbo Sync) and Paginated Dashboard', () => {
+    const appSrc = fs.readFileSync(path.join(ROOT, 'src/app-source.jsx'), 'utf8');
+    const dashSrc = fs.readFileSync(path.join(ROOT, 'src/dashboard-source.jsx'), 'utf8');
+
+    // Contractor reads single packed doc `crew_${adminId}` instead of permanent collection stream
+    assert.ok(appSrc.includes('const crewBoardDocId = `crew_${adminId}`;'), 'Crew board single-doc ID must be wired');
+    assert.ok(appSrc.includes('activateLiveRadar'), 'On-demand Live Radar lease must exist');
+    assert.ok(appSrc.includes('fetchCrewTelemetryOnce'), 'Cached single-doc telemetry fetch must exist');
+    assert.ok(!appSrc.includes("db.collection('worker_telemetry').where('adminId', '==', adminId).onSnapshot"), 'Always-on contractor worker_telemetry collection listener must be removed');
+
+    // Worker writes Ultra-Eco/Turbo adaptive telemetry into Crew Board and eliminates periodic attendance polling
+    assert.ok(appSrc.includes("syncMode: isTurboWatched ? 'turbo' : 'eco'"), 'Adaptive Eco/Turbo telemetry sync must be wired');
+    assert.ok(appSrc.includes('elapsedSinceSync >= 960000'), '16-minute Ultra-Eco heartbeat must stay inside 22-min offline threshold');
+    assert.ok(appSrc.includes('const shouldSyncAttendance = Boolean(tA?.id && inBoundsChanged);'), 'Periodic attendance writes during shift must be eliminated');
+    assert.ok(appSrc.includes('workerHistoryLimit'), 'Worker historical queries must be paginated');
+    assert.ok(appSrc.includes("db.collection('announcements').limit(30)"), 'Announcements listener must be bounded');
+
+    // Dashboard uses tab-scoped paginated listeners + server-side count() aggregation
+    assert.ok(dashSrc.includes('refreshCloudCounts'), 'Dashboard server-side count() aggregation must exist');
+    assert.ok(dashSrc.includes('dashLimits'), 'Dashboard collection pagination limits must exist');
+    assert.ok(dashSrc.includes('loadMoreForCollection'), 'Dashboard load-more control must exist');
+    assert.ok(!dashSrc.includes("db.collection('admins').onSnapshot("), 'Unbounded admins listener must be replaced with paginated limit()');
+    assert.ok(!dashSrc.includes("db.collection('workers').onSnapshot("), 'Unbounded workers listener must be replaced with paginated limit()');
+});
+

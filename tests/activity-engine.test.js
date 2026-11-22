@@ -86,13 +86,13 @@ test('4-state live worker status accurately distinguishes active, idle, out_of_s
     assert.equal(outOfSite.code, 'out_of_site');
     assert.ok(outOfSite.title.includes('340'));
 
-    // 4. Offline (heartbeat stale > 10 minutes)
+    // 4. Offline (heartbeat stale > 22 minutes — aligned with 16-min Ultra-Eco heartbeat)
     const offline = ActivityEngine.classifyWorkerLiveStatus({
         worker: {
             id: 'w4',
             todayEffortDate: today,
-            lastHeartbeatAt: now - 18 * 60 * 1000,
-            lastMotionAt: now - 18 * 60 * 1000,
+            lastHeartbeatAt: now - 26 * 60 * 1000,
+            lastMotionAt: now - 26 * 60 * 1000,
             liveInBounds: true
         },
         todayRec: { workerId: 'w4', date: today, status: 'full', timeIn: shiftStart },
@@ -101,7 +101,7 @@ test('4-state live worker status accurately distinguishes active, idle, out_of_s
         lang: 'ar'
     });
     assert.equal(offline.code, 'offline');
-    assert.equal(offline.offlineMinutes, 18);
+    assert.equal(offline.offlineMinutes, 26);
 
     // 5. Off shift (clocked out)
     const offShift = ActivityEngine.classifyWorkerLiveStatus({
@@ -122,7 +122,7 @@ test('summarizeCrewActivity aggregates live crew statuses accurately', () => {
         { id: 'w1', todayEffortDate: today, lastHeartbeatAt: now - 60000, lastMotionAt: now - 60000, liveInBounds: true },
         { id: 'w2', todayEffortDate: today, lastHeartbeatAt: now - 60000, lastMotionAt: now - 15 * 60000, liveInBounds: true },
         { id: 'w3', todayEffortDate: today, lastHeartbeatAt: now - 60000, lastMotionAt: now - 60000, liveInBounds: false },
-        { id: 'w4', todayEffortDate: today, lastHeartbeatAt: now - 20 * 60000, lastMotionAt: now - 20 * 60000, liveInBounds: true },
+        { id: 'w4', todayEffortDate: today, lastHeartbeatAt: now - 28 * 60000, lastMotionAt: now - 28 * 60000, liveInBounds: true },
         { id: 'w5', todayEffortDate: today }
     ];
     const atts = [

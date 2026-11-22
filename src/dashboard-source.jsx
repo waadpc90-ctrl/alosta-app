@@ -173,6 +173,18 @@
                         limit: baseQ.limit,
                         get: baseQ.get,
                         onSnapshot: baseQ.onSnapshot,
+                        count: async () => {
+                            await ensureAuthBeforeWrite();
+                            try {
+                                const colRef = rawDb.collection(colName);
+                                if (typeof colRef.count === 'function') {
+                                    const aggSnap = await colRef.count().get();
+                                    const val = aggSnap && typeof aggSnap.data === 'function' ? aggSnap.data().count : null;
+                                    if (Number.isFinite(val)) return val;
+                                }
+                            } catch (e) {}
+                            return null;
+                        },
                         add: async (data) => {
                             await ensureAuthBeforeWrite();
                             const clean = sanitizePatch(data, true);
@@ -1005,13 +1017,13 @@
                             }
                         });
 
-                        unsubProds = db.collection('store_products').where('storeId', '==', targetStore.id).onSnapshot((snap) => {
+                        unsubProds = db.collection('store_products').where('storeId', '==', targetStore.id).limit(300).onSnapshot((snap) => {
                             const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
                             list.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
                             setProducts(list);
                         });
 
-                        unsubOrders = db.collection('store_orders').where('storeId', '==', targetStore.id).onSnapshot((snap) => {
+                        unsubOrders = db.collection('store_orders').where('storeId', '==', targetStore.id).limit(200).onSnapshot((snap) => {
                             const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
                             list.sort((a, b) => String(b.createdAt || b.date || '').localeCompare(String(a.createdAt || a.date || '')));
                             setOrders(list);
@@ -2637,6 +2649,28 @@
                 verifiedWorkerAnnualPrice: 50000,
                 subscriptionWhatsapp: ''
             });
+            const [cloudAppConfig, setCloudAppConfig] = useState(null);
+            const [isConfigDirty, setIsConfigDirty] = useState(false);
+            const [configSaveError, setConfigSaveError] = useState('');
+            const appConfigDirtyRef = useRef(false);
+
+            const updateAppConfigFields = (patch) => {
+                appConfigDirtyRef.current = true;
+                setIsConfigDirty(true);
+                setConfigSaveError('');
+                setAppConfig((prev) => ({ ...prev, ...patch }));
+            };
+
+            const bumpPatchVersion = () => {
+                const raw = String(appConfig.latestVersion || APP_VERSION).trim();
+                const parts = raw.split('.').map((n) => parseInt(n, 10));
+                if (parts.length >= 3 && parts.every((n) => Number.isFinite(n))) {
+                    parts[2] = parts[2] + 1;
+                    updateAppConfigFields({ latestVersion: parts.slice(0, 3).join('.') });
+                } else {
+                    updateAppConfigFields({ latestVersion: '1.0.19' });
+                }
+            };
 
             const [editingContractor, setEditingContractor] = useState(null);
             const [editingWorker, setEditingWorker] = useState(null);
@@ -2646,6 +2680,57 @@
             const [annImgPreview, setAnnImgPreview] = useState('');
             const [savingId, setSavingId] = useState('');
             const [syncHealthy, setSyncHealthy] = useState(true);
+            // Scalable Dashboard Pagination Limits & Server-Side Aggregation Counts (prevents OOM & cuts launch reads ~95%)
+            const [dashLimits, setDashLimits] = useState({
+                admins: 100,
+                workers: 100,
+                stores: 80,
+                storeProducts: 150,
+                storeOrders: 120,
+                projects: 150,
+                announcements: 50
+            });
+            const [cloudCounts, setCloudCounts] = useState({
+                admins: null,
+                workers: null,
+                stores: null,
+                storeProducts: null,
+                storeOrders: null,
+                projects: null,
+                announcements: null
+            });
+            const [countsRefreshing, setCountsRefreshing] = useState(false);
+
+            const refreshCloudCounts = async () => {
+                setCountsRefreshing(true);
+                try {
+                    const [cAdmins, cWorkers, cStores, cProducts, cOrders, cProjects, cAnn] = await Promise.all([
+                        db.collection('admins').count(),
+                        db.collection('workers').count(),
+                        db.collection('stores').count(),
+                        db.collection('store_products').count(),
+                        db.collection('store_orders').count(),
+                        db.collection('projects').count(),
+                        db.collection('announcements').count()
+                    ]);
+                    setCloudCounts({
+                        admins: cAdmins,
+                        workers: cWorkers,
+                        stores: cStores,
+                        storeProducts: cProducts,
+                        storeOrders: cOrders,
+                        projects: cProjects,
+                        announcements: cAnn
+                    });
+                } catch (e) {
+                } finally {
+                    setCountsRefreshing(false);
+                }
+            };
+
+            const loadMoreForCollection = (key, step = 100) => {
+                setDashLimits((prev) => ({ ...prev, [key]: (prev[key] || 100) + step }));
+            };
 
             const addToast = (msg, type = 'success') => {
                 const id = Date.now() + Math.random();
@@ -2655,64 +2740,128 @@
                 }, 4000);
             };
 
+            // 1) Lightweight Always-On Config Listener (1 doc) + Server-Side Count Aggregation (1/1000th read cost)
             useEffect(() => {
-                const unsubs = [
-                    db.collection('admins').onSnapshot(
-                        (snap) => {
-                            setSyncHealthy(true);
-                            setAdmins(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-                        },
-                        () => setSyncHealthy(false)
-                    ),
-                    db.collection('workers').onSnapshot(
-                        (snap) => {
-                            setSyncHealthy(true);
-                            setWorkers(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-                        },
-                        () => setSyncHealthy(false)
-                    ),
-                    db.collection('stores').onSnapshot(
-                        (snap) => {
-                            setStores(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+                refreshCloudCounts();
+                const unsubCfg = db.collection('settings').doc('app_config').onSnapshot(
+                    (docSnap) => {
+                        setSyncHealthy(true);
+                        if (docSnap && docSnap.exists) {
+                            const data = docSnap.data() || {};
+                            const syncedUrl = String(data.apkUrl || data.rawApkUrl || '').trim();
+                            const normalized = {
+                                ...data,
+                                latestVersion: String(data.latestVersion || APP_VERSION).trim(),
+                                apkUrl: syncedUrl,
+                                rawApkUrl: syncedUrl
+                            };
+                            setCloudAppConfig(normalized);
+                            if (!appConfigDirtyRef.current) {
+                                setAppConfig((prev) => ({ ...prev, ...normalized }));
+                            }
                         }
-                    ),
-                    db.collection('store_products').onSnapshot(
-                        (snap) => {
+                    },
+                    () => setSyncHealthy(false)
+                );
+                return () => { try { unsubCfg && unsubCfg(); } catch (e) {} };
+            }, []);
+
+            // 2) Tab-Scoped & Paginated Listeners (ZERO unbounded full-collection downloads!)
+            useEffect(() => {
+                const unsubs = [];
+
+                if (activeTab === 'stores' || activeTab === 'settings') {
+                    unsubs.push(
+                        db.collection('stores').limit(dashLimits.stores).onSnapshot(
+                            (snap) => {
+                                setSyncHealthy(true);
+                                setStores(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+                            },
+                            () => setSyncHealthy(false)
+                        )
+                    );
+                }
+
+                if (activeTab === 'stores') {
+                    const prodQ = productStoreFilter && productStoreFilter !== 'all'
+                        ? db.collection('store_products').where('storeId', '==', productStoreFilter).limit(dashLimits.storeProducts)
+                        : db.collection('store_products').limit(dashLimits.storeProducts);
+                    unsubs.push(
+                        prodQ.onSnapshot((snap) => {
                             setStoreProducts(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-                        }
-                    ),
-                    db.collection('store_orders').onSnapshot(
-                        (snap) => {
+                        })
+                    );
+
+                    const orderQ = orderStoreFilter && orderStoreFilter !== 'all'
+                        ? db.collection('store_orders').where('storeId', '==', orderStoreFilter).limit(dashLimits.storeOrders)
+                        : db.collection('store_orders').limit(dashLimits.storeOrders);
+                    unsubs.push(
+                        orderQ.onSnapshot((snap) => {
                             const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
                             list.sort((a, b) => String(b.createdAt || b.date || '').localeCompare(String(a.createdAt || a.date || '')));
                             setStoreOrders(list);
-                        }
-                    ),
-                    db.collection('projects').onSnapshot(
-                        (snap) => {
+                        })
+                    );
+                }
+
+                if (activeTab === 'contractors' || activeTab === 'settings') {
+                    unsubs.push(
+                        db.collection('admins').limit(dashLimits.admins).onSnapshot(
+                            (snap) => {
+                                setSyncHealthy(true);
+                                setAdmins(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+                            },
+                            () => setSyncHealthy(false)
+                        )
+                    );
+                }
+
+                if (activeTab === 'contractors') {
+                    unsubs.push(
+                        db.collection('projects').limit(dashLimits.projects).onSnapshot((snap) => {
                             setProjects(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-                        }
-                    ),
-                    db.collection('announcements').onSnapshot(
-                        (snap) => {
+                        })
+                    );
+                }
+
+                if (activeTab === 'workers' || activeTab === 'contractors' || activeTab === 'settings') {
+                    unsubs.push(
+                        db.collection('workers').limit(dashLimits.workers).onSnapshot(
+                            (snap) => {
+                                setSyncHealthy(true);
+                                setWorkers(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+                            },
+                            () => setSyncHealthy(false)
+                        )
+                    );
+                }
+
+                if (activeTab === 'announcements') {
+                    unsubs.push(
+                        db.collection('announcements').limit(dashLimits.announcements).onSnapshot((snap) => {
                             const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
                             list.sort((a, b) => {
                                 if (Boolean(b.isPinned) !== Boolean(a.isPinned)) return b.isPinned ? 1 : -1;
                                 return String(b.updatedAt || b.date || '').localeCompare(String(a.updatedAt || a.date || ''));
                             });
                             setAnnouncements(list);
-                        }
-                    ),
-                    db.collection('settings').doc('app_config').onSnapshot(
-                        (docSnap) => {
-                            if (docSnap && docSnap.exists) {
-                                setAppConfig((prev) => ({ ...prev, ...(docSnap.data() || {}) }));
-                            }
-                        }
-                    )
-                ];
+                        })
+                    );
+                }
+
                 return () => unsubs.forEach((u) => { try { u && u(); } catch (e) {} });
-            }, []);
+            }, [
+                activeTab,
+                productStoreFilter,
+                orderStoreFilter,
+                dashLimits.admins,
+                dashLimits.workers,
+                dashLimits.stores,
+                dashLimits.storeProducts,
+                dashLimits.storeOrders,
+                dashLimits.projects,
+                dashLimits.announcements
+            ]);
 
             // =========================================================================
             // 1. CONTRACTORS HANDLERS
@@ -3137,17 +3286,63 @@
             // =========================================================================
             // 5. SETTINGS & OTA UPDATES HANDLER
             // =========================================================================
+            const handleReloadCloudConfig = async () => {
+                setSavingId('app_config');
+                setConfigSaveError('');
+                try {
+                    const docSnap = await db.collection('settings').doc('app_config').get();
+                    if (docSnap && docSnap.exists) {
+                        const data = docSnap.data() || {};
+                        const syncedUrl = String(data.apkUrl || data.rawApkUrl || '').trim();
+                        const normalized = {
+                            ...data,
+                            latestVersion: String(data.latestVersion || APP_VERSION).trim(),
+                            apkUrl: syncedUrl,
+                            rawApkUrl: syncedUrl
+                        };
+                        appConfigDirtyRef.current = false;
+                        setIsConfigDirty(false);
+                        setCloudAppConfig(normalized);
+                        setAppConfig((prev) => ({ ...prev, ...normalized }));
+                        addToast(`🔄 تم جلب آخر إعدادات السحابة (v${normalized.latestVersion}) بنجاح`);
+                    } else {
+                        addToast('لا توجد إعدادات محفوظة بعد في السحابة', 'error');
+                    }
+                } catch (err) {
+                    const msg = err && err.message ? err.message : 'تعذر الاتصال بالسحابة';
+                    setConfigSaveError(msg);
+                    addToast('⛔ تعذر قراءة الإعدادات من السحابة: ' + msg, 'error');
+                } finally {
+                    setSavingId('');
+                }
+            };
+
             const handleSaveAppConfig = async (e, pushMode = 'save') => {
                 if (e && e.preventDefault) e.preventDefault();
+                const cleanVersion = String(appConfig.latestVersion ?? '').trim();
+                const cleanApkUrl = String(appConfig.apkUrl ?? '').trim();
+                const cleanPortalUrl = String(appConfig.portalBaseUrl ?? '').trim() || 'https://waadpc90-ctrl.github.io/alustadh/';
+
+                if (!cleanVersion) {
+                    setConfigSaveError('يرجى كتابة رقم الإصدار (مثال: 1.0.19) قبل الحفظ.');
+                    addToast('⚠️ يرجى كتابة رقم الإصدار قبل الحفظ', 'error');
+                    return;
+                }
+                if (pushMode === 'push' && !cleanApkUrl) {
+                    setConfigSaveError('يرجى إدخال رابط ملف التحديث المباشر (APK URL) قبل إرسال إشعار التحديث.');
+                    addToast('⚠️ يرجى إدخال رابط ملف التحديث (APK URL) أولاً', 'error');
+                    return;
+                }
+
                 setSavingId('app_config');
+                setConfigSaveError('');
                 try {
                     const payload = {
-                        ...appConfig,
-                        latestVersion: String(appConfig.latestVersion || APP_VERSION).trim(),
-                        apkUrl: String(appConfig.apkUrl || '').trim(),
-                        rawApkUrl: String(appConfig.rawApkUrl || appConfig.apkUrl || '').trim(),
-                        portalBaseUrl: String(appConfig.portalBaseUrl || 'https://waadpc90-ctrl.github.io/alustadh/').trim(),
-                        forceUpdate: Boolean(appConfig.forceUpdate),
+                        latestVersion: cleanVersion,
+                        apkUrl: cleanApkUrl,
+                        rawApkUrl: cleanApkUrl,
+                        portalBaseUrl: cleanPortalUrl,
+                        forceUpdate: pushMode === 'stop' ? false : Boolean(appConfig.forceUpdate),
                         stopUpdate: pushMode === 'stop' ? true : (pushMode === 'push' ? false : Boolean(appConfig.stopUpdate)),
                         maintenanceMode: Boolean(appConfig.maintenanceMode),
                         monetizationEnabled: Boolean(appConfig.monetizationEnabled),
@@ -3170,7 +3365,7 @@
 
                     if (pushMode === 'push') {
                         payload.pushUpdateToken = String(Date.now());
-                        payload.pushTargetVersion = payload.latestVersion;
+                        payload.pushTargetVersion = cleanVersion;
                         payload.stopUpdate = false;
                     } else if (pushMode === 'stop') {
                         payload.stopUpdate = true;
@@ -3178,17 +3373,23 @@
                     }
 
                     await db.collection('settings').doc('app_config').set(payload, { merge: true });
-                    setAppConfig(payload);
+
+                    appConfigDirtyRef.current = false;
+                    setIsConfigDirty(false);
+                    setAppConfig((prev) => ({ ...prev, ...payload }));
+                    setCloudAppConfig((prev) => ({ ...(prev || {}), ...payload }));
 
                     if (pushMode === 'push') {
-                        addToast(`🚀 تم حفظ الإعدادات وإرسال إشعار التحديث الفوري (v${payload.latestVersion}) لجميع الأجهزة!`);
+                        addToast(`🚀 تم تحديث الإصدار (v${payload.latestVersion}) ورابط التحديث وإرسال إشعار فوري لجميع الأجهزة!`);
                     } else if (pushMode === 'stop') {
-                        addToast(`⏹️ تم إيقاف إشعار التحديث الفوري لجميع الأجهزة بنجاح.`);
+                        addToast(`⏹️ تم إيقاف إشعار التحديث الفوري وحفظ الإعدادات (v${payload.latestVersion}) بنجاح.`);
                     } else {
-                        addToast('✓ تم حفظ إعدادات النظام والاشتراكات والتحديث في السحابة بنجاح!');
+                        addToast(`✓ تم حفظ رقم الإصدار (v${payload.latestVersion}) ورابط التحديث وإعدادات النظام في السحابة بنجاح!`);
                     }
                 } catch (err) {
-                    addToast('⛔ تعذر حفظ الإعدادات: ' + (err.message || ''), 'error');
+                    const msg = (err && err.message) ? err.message : 'تحقق من اتصال الإنترنت وقواعد Firestore';
+                    setConfigSaveError('⛔ فشل الحفظ في السحابة: ' + msg);
+                    addToast('⛔ تعذر حفظ الإعدادات: ' + msg, 'error');
                 } finally {
                     setSavingId('');
                 }
@@ -3358,9 +3559,9 @@
                                 }`}
                             >
                                 <div className="text-[11px] font-bold text-slate-400">🏪 المعارض والمحلات</div>
-                                <div className="text-2xl font-black text-white mt-0.5">{stores.length}</div>
+                                <div className="text-2xl font-black text-white mt-0.5">{cloudCounts.stores !== null ? cloudCounts.stores : stores.length}</div>
                                 <div className="text-[10px] font-black text-amber-300 mt-1">
-                                    📦 منتجات: {storeProducts.length} • 🧾 طلبات: {storeOrders.length}
+                                    📦 منتجات: {cloudCounts.storeProducts !== null ? cloudCounts.storeProducts : storeProducts.length} • 🧾 طلبات: {cloudCounts.storeOrders !== null ? cloudCounts.storeOrders : storeOrders.length}
                                 </div>
                             </button>
 
@@ -3373,9 +3574,9 @@
                                 }`}
                             >
                                 <div className="text-[11px] font-bold text-slate-400">👷 المقاولون</div>
-                                <div className="text-2xl font-black text-white mt-0.5">{admins.length}</div>
+                                <div className="text-2xl font-black text-white mt-0.5">{cloudCounts.admins !== null ? cloudCounts.admins : admins.length}</div>
                                 <div className="text-[10px] font-black text-amber-400 mt-1">
-                                    👑 Pro: {admins.filter((a) => a.isPro || a.isVerifiedPro).length} • مشاريع: {projects.length}
+                                    👑 Pro: {admins.filter((a) => a.isPro || a.isVerifiedPro).length} • مشاريع: {cloudCounts.projects !== null ? cloudCounts.projects : projects.length}
                                 </div>
                             </button>
 
@@ -3388,7 +3589,7 @@
                                 }`}
                             >
                                 <div className="text-[11px] font-bold text-slate-400">🛠️ العمال والحرفيون</div>
-                                <div className="text-2xl font-black text-white mt-0.5">{workers.length}</div>
+                                <div className="text-2xl font-black text-white mt-0.5">{cloudCounts.workers !== null ? cloudCounts.workers : workers.length}</div>
                                 <div className="text-[10px] font-black text-emerald-400 mt-1">
                                     🌟 موثقون Pro: {workers.filter((w) => w.isVerifiedPro).length}
                                 </div>
@@ -3403,7 +3604,7 @@
                                 }`}
                             >
                                 <div className="text-[11px] font-bold text-slate-400">📢 إعلانات النظام</div>
-                                <div className="text-2xl font-black text-white mt-0.5">{announcements.length}</div>
+                                <div className="text-2xl font-black text-white mt-0.5">{cloudCounts.announcements !== null ? cloudCounts.announcements : announcements.length}</div>
                                 <div className="text-[10px] font-black text-rose-300 mt-1">
                                     🟢 نشط حالياً: {activeAnnouncementsCount}
                                 </div>
@@ -3570,6 +3771,50 @@
                                         </select>
                                     </div>
                                 )}
+
+                                {/* High-Capacity Pagination & Aggregation Strip */}
+                                {(() => {
+                                    const activeMeta =
+                                        activeTab === 'contractors'
+                                            ? { key: 'admins', loaded: admins.length, limit: dashLimits.admins, total: cloudCounts.admins, label: 'مقاول' }
+                                            : activeTab === 'workers'
+                                            ? { key: 'workers', loaded: workers.length, limit: dashLimits.workers, total: cloudCounts.workers, label: 'عامل' }
+                                            : activeTab === 'announcements'
+                                            ? { key: 'announcements', loaded: announcements.length, limit: dashLimits.announcements, total: cloudCounts.announcements, label: 'إعلان' }
+                                            : activeTab === 'stores' && storesSubTab === 'products'
+                                            ? { key: 'storeProducts', loaded: storeProducts.length, limit: dashLimits.storeProducts, total: cloudCounts.storeProducts, label: 'منتج' }
+                                            : activeTab === 'stores' && storesSubTab === 'orders'
+                                            ? { key: 'storeOrders', loaded: storeOrders.length, limit: dashLimits.storeOrders, total: cloudCounts.storeOrders, label: 'طلب' }
+                                            : { key: 'stores', loaded: stores.length, limit: dashLimits.stores, total: cloudCounts.stores, label: 'معرض' };
+                                    const hasMore = activeMeta.loaded >= activeMeta.limit || (activeMeta.total !== null && activeMeta.total > activeMeta.loaded);
+                                    return (
+                                        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80 text-[10.5px]">
+                                            <span className="font-bold text-slate-400">
+                                                ⚡ السعة الذكية: معروض <span className="text-white font-black">{activeMeta.loaded}</span>
+                                                {activeMeta.total !== null ? ` من أصل ${activeMeta.total}` : ''} {activeMeta.label} (تحميل عند الطلب لتوفير 95% من القراءات)
+                                            </span>
+                                            <div className="flex items-center gap-1.5">
+                                                <button
+                                                    type="button"
+                                                    disabled={countsRefreshing}
+                                                    onClick={refreshCloudCounts}
+                                                    className="px-2.5 py-1 rounded-xl bg-slate-950 border border-slate-800 text-slate-300 font-black hover:border-slate-700"
+                                                >
+                                                    {countsRefreshing ? 'جاري...' : '🔄 تحديث العدادات'}
+                                                </button>
+                                                {hasMore && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => loadMoreForCollection(activeMeta.key, 100)}
+                                                        className="px-3 py-1 rounded-xl bg-indigo-600/20 border border-indigo-500/40 text-indigo-300 font-black hover:bg-indigo-600/30"
+                                                    >
+                                                        + تحميل 100 سجل إضافي
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
                             </div>
                         )}
 
@@ -4446,50 +4691,134 @@
                                     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
                                         <div>
                                             <h2 className="font-black text-base text-white">🚀 مركز التحديث السحابي الفوري (OTA) ووضع الصيانة</h2>
-                                            <p className="text-xs font-bold text-slate-400">التحكم بإصدار التطبيق وإرسال تنبيه التحديث الفوري أو التحديث الإجباري</p>
+                                            <p className="text-xs font-bold text-slate-400">التحكم بإصدار التطبيق ورابط التحديث المباشر وإرسال تنبيه التحديث الفوري</p>
                                         </div>
-                                        <span className="px-3 py-1 rounded-xl font-mono text-xs font-black bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                                            v{appConfig.latestVersion || APP_VERSION}
-                                        </span>
+                                        <div className="flex items-center gap-2">
+                                            {isConfigDirty && (
+                                                <span className="px-2.5 py-1 rounded-xl text-[10px] font-black bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                                    ⚠️ تعديلات غير محفوظة
+                                                </span>
+                                            )}
+                                            <button
+                                                type="button"
+                                                disabled={savingId === 'app_config'}
+                                                onClick={handleReloadCloudConfig}
+                                                className="px-2.5 py-1 rounded-xl text-[11px] font-black bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+                                            >
+                                                🔄 مزامنة السحابة
+                                            </button>
+                                            <span className="px-3 py-1 rounded-xl font-mono text-xs font-black bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                                                v{cloudAppConfig?.latestVersion || appConfig.latestVersion || APP_VERSION}
+                                            </span>
+                                        </div>
                                     </div>
+
+                                    {configSaveError && (
+                                        <div className="p-3 rounded-2xl bg-rose-950/70 border border-rose-500/40 text-rose-200 text-xs font-black">
+                                            {configSaveError}
+                                        </div>
+                                    )}
+
+                                    {/* Live Cloud State Verification Strip */}
+                                    {cloudAppConfig && (
+                                        <div className="p-3 rounded-2xl bg-slate-950/70 border border-emerald-500/30 text-[11px] space-y-1">
+                                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                                <span className="font-black text-emerald-300">☁️ المحفوظ فعلياً في السحابة الآن:</span>
+                                                {cloudAppConfig.updatedAt && (
+                                                    <span className="font-mono text-[10px] text-slate-400">
+                                                        آخر حفظ: {String(cloudAppConfig.updatedAt).replace('T', ' ').slice(0, 19)}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="flex flex-wrap items-center gap-3 font-bold text-slate-300">
+                                                <span>الإصدار: <span className="font-mono text-amber-300">v{cloudAppConfig.latestVersion || APP_VERSION}</span></span>
+                                                <span className="truncate max-w-full">الرابط: <span className="font-mono text-indigo-300" dir="ltr">{cloudAppConfig.apkUrl || cloudAppConfig.rawApkUrl || 'غير محدد'}</span></span>
+                                            </div>
+                                        </div>
+                                    )}
 
                                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                                         <label className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
                                             <span className="text-xs font-black text-amber-300">إلزام التحديث الإجباري</span>
-                                            <input type="checkbox" checked={Boolean(appConfig.forceUpdate)} onChange={(e) => setAppConfig((p) => ({ ...p, forceUpdate: e.target.checked }))} className="w-5 h-5" />
+                                            <input type="checkbox" checked={Boolean(appConfig.forceUpdate)} onChange={(e) => updateAppConfigFields({ forceUpdate: e.target.checked })} className="w-5 h-5" />
                                         </label>
                                         <label className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
                                             <span className="text-xs font-black text-slate-200">إيقاف نافذة التحديث مؤقتاً</span>
-                                            <input type="checkbox" checked={Boolean(appConfig.stopUpdate)} onChange={(e) => setAppConfig((p) => ({ ...p, stopUpdate: e.target.checked }))} className="w-5 h-5" />
+                                            <input type="checkbox" checked={Boolean(appConfig.stopUpdate)} onChange={(e) => updateAppConfigFields({ stopUpdate: e.target.checked })} className="w-5 h-5" />
                                         </label>
                                         <label className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
                                             <span className="text-xs font-black text-rose-300">وضع الصيانة المؤقت</span>
-                                            <input type="checkbox" checked={Boolean(appConfig.maintenanceMode)} onChange={(e) => setAppConfig((p) => ({ ...p, maintenanceMode: e.target.checked }))} className="w-5 h-5" />
+                                            <input type="checkbox" checked={Boolean(appConfig.maintenanceMode)} onChange={(e) => updateAppConfigFields({ maintenanceMode: e.target.checked })} className="w-5 h-5" />
                                         </label>
                                     </div>
 
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">رقم أحدث إصدار للتطبيق (latestVersion)</label>
-                                            <input type="text" value={appConfig.latestVersion || APP_VERSION} onChange={(e) => setAppConfig((p) => ({ ...p, latestVersion: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-mono font-black text-amber-300" />
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="text"
+                                                    dir="ltr"
+                                                    value={appConfig.latestVersion ?? ''}
+                                                    onChange={(e) => updateAppConfigFields({ latestVersion: e.target.value })}
+                                                    placeholder="1.0.19"
+                                                    className="flex-1 p-3 rounded-2xl bg-slate-950 border border-slate-800 focus:border-amber-400 focus:outline-none text-sm font-mono font-black text-amber-300"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={bumpPatchVersion}
+                                                    className="px-3 py-3 rounded-2xl bg-amber-500/20 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 font-mono font-black text-xs shrink-0"
+                                                    title="زيادة رقم الإصدار تلقائياً"
+                                                >
+                                                    +0.0.1
+                                                </button>
+                                            </div>
                                         </div>
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">الرابط الأساسي لبوابة المعارض (portalBaseUrl)</label>
-                                            <input type="text" value={appConfig.portalBaseUrl || 'https://waadpc90-ctrl.github.io/alustadh/'} onChange={(e) => setAppConfig((p) => ({ ...p, portalBaseUrl: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-xs font-mono text-slate-300" />
+                                            <input
+                                                type="text"
+                                                dir="ltr"
+                                                value={appConfig.portalBaseUrl ?? ''}
+                                                onChange={(e) => updateAppConfigFields({ portalBaseUrl: e.target.value })}
+                                                placeholder="https://waadpc90-ctrl.github.io/alustadh/"
+                                                className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:outline-none text-xs font-mono text-slate-300"
+                                            />
                                         </div>
                                     </div>
 
                                     <div>
-                                        <label className="text-[11px] font-bold text-slate-400 block mb-1">رابط ملف التحديث المباشر (APK URL)</label>
-                                        <input type="text" value={appConfig.apkUrl || ''} onChange={(e) => setAppConfig((p) => ({ ...p, apkUrl: e.target.value, rawApkUrl: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-xs font-mono text-indigo-300" />
+                                        <div className="flex items-center justify-between gap-2 mb-1">
+                                            <label className="text-[11px] font-bold text-slate-400">رابط ملف التحديث المباشر (APK URL)</label>
+                                            {appConfig.apkUrl && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => updateAppConfigFields({ apkUrl: '', rawApkUrl: '' })}
+                                                    className="text-[10px] font-black text-rose-400"
+                                                >
+                                                    مسح الرابط ✕
+                                                </button>
+                                            )}
+                                        </div>
+                                        <input
+                                            type="text"
+                                            dir="ltr"
+                                            value={appConfig.apkUrl ?? ''}
+                                            onChange={(e) => updateAppConfigFields({ apkUrl: e.target.value, rawApkUrl: e.target.value })}
+                                            placeholder="https://github.com/.../AlOsta_App.apk"
+                                            className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:outline-none text-xs font-mono text-indigo-300"
+                                        />
                                     </div>
 
-                                    <div className="flex flex-wrap gap-2.5 pt-1">
+                                    <div className="flex flex-wrap gap-2 pt-1">
+                                        <button type="button" disabled={savingId === 'app_config'} onClick={(e) => handleSaveAppConfig(e, 'save')} className="py-3.5 px-4 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-xs shadow-lg">
+                                            {savingId === 'app_config' ? 'جاري الحفظ...' : '💾 حفظ الإصدار والرابط ✓'}
+                                        </button>
                                         <button type="button" disabled={savingId === 'app_config'} onClick={(e) => handleSaveAppConfig(e, 'push')} className="flex-1 py-3.5 px-5 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs shadow-lg">
                                             🚀 حفظ وإرسال إشعار تحديث فوري لجميع الأجهزة
                                         </button>
-                                        <button type="button" disabled={savingId === 'app_config'} onClick={(e) => handleSaveAppConfig(e, 'stop')} className="py-3.5 px-5 rounded-2xl bg-rose-950/80 border border-rose-600/40 text-rose-200 font-black text-xs">
-                                            ⏹️ إيقاف إشعار التحديث للجميع
+                                        <button type="button" disabled={savingId === 'app_config'} onClick={(e) => handleSaveAppConfig(e, 'stop')} className="py-3.5 px-4 rounded-2xl bg-rose-950/80 border border-rose-600/40 text-rose-200 font-black text-xs">
+                                            ⏹️ إيقاف التحديث
                                         </button>
                                     </div>
                                 </div>
@@ -4502,75 +4831,75 @@
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                         <label className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
                                             <span className="text-xs font-black text-emerald-300">تفعيل نظام الاشتراكات المدفوعة (Pro)</span>
-                                            <input type="checkbox" checked={Boolean(appConfig.monetizationEnabled)} onChange={(e) => setAppConfig((p) => ({ ...p, monetizationEnabled: e.target.checked }))} className="w-5 h-5" />
+                                            <input type="checkbox" checked={Boolean(appConfig.monetizationEnabled)} onChange={(e) => updateAppConfigFields({ monetizationEnabled: e.target.checked })} className="w-5 h-5" />
                                         </label>
                                         <label className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
                                             <span className="text-xs font-black text-indigo-300">التفعيل التلقائي عند الوصول للهدف</span>
-                                            <input type="checkbox" checked={Boolean(appConfig.autoEnableOnTarget)} onChange={(e) => setAppConfig((p) => ({ ...p, autoEnableOnTarget: e.target.checked }))} className="w-5 h-5" />
+                                            <input type="checkbox" checked={Boolean(appConfig.autoEnableOnTarget)} onChange={(e) => updateAppConfigFields({ autoEnableOnTarget: e.target.checked })} className="w-5 h-5" />
                                         </label>
                                     </div>
 
                                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">هدف عدد المقاولين ({admins.length} حالياً)</label>
-                                            <input type="number" value={appConfig.targetContractorsCount ?? 500} onChange={(e) => setAppConfig((p) => ({ ...p, targetContractorsCount: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
+                                            <input type="number" value={appConfig.targetContractorsCount ?? 500} onChange={(e) => updateAppConfigFields({ targetContractorsCount: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
                                         </div>
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">هدف عدد العمال ({workers.length} حالياً)</label>
-                                            <input type="number" value={appConfig.targetWorkersCount ?? 2000} onChange={(e) => setAppConfig((p) => ({ ...p, targetWorkersCount: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
+                                            <input type="number" value={appConfig.targetWorkersCount ?? 2000} onChange={(e) => updateAppConfigFields({ targetWorkersCount: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
                                         </div>
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">هدف عدد المعارض ({stores.length} حالياً)</label>
-                                            <input type="number" value={appConfig.targetStoresCount ?? 15} onChange={(e) => setAppConfig((p) => ({ ...p, targetStoresCount: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
+                                            <input type="number" value={appConfig.targetStoresCount ?? 15} onChange={(e) => updateAppConfigFields({ targetStoresCount: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
                                         </div>
                                     </div>
 
                                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">حد المشاريع المجانية للمقاول</label>
-                                            <input type="number" value={appConfig.freeMaxProjects ?? 2} onChange={(e) => setAppConfig((p) => ({ ...p, freeMaxProjects: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
+                                            <input type="number" value={appConfig.freeMaxProjects ?? 2} onChange={(e) => updateAppConfigFields({ freeMaxProjects: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
                                         </div>
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">حد العمال المجاني للمقاول</label>
-                                            <input type="number" value={appConfig.freeMaxWorkers ?? 5} onChange={(e) => setAppConfig((p) => ({ ...p, freeMaxWorkers: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
+                                            <input type="number" value={appConfig.freeMaxWorkers ?? 5} onChange={(e) => updateAppConfigFields({ freeMaxWorkers: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
                                         </div>
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">حد المنتجات المجاني للمعرض</label>
-                                            <input type="number" value={appConfig.freeStoreMaxProducts ?? 10} onChange={(e) => setAppConfig((p) => ({ ...p, freeStoreMaxProducts: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
+                                            <input type="number" value={appConfig.freeStoreMaxProducts ?? 10} onChange={(e) => updateAppConfigFields({ freeStoreMaxProducts: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-white" />
                                         </div>
                                     </div>
 
                                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">اشتراك المقاول الشهري (د.ع)</label>
-                                            <input type="number" value={appConfig.proContractorPrice ?? 25000} onChange={(e) => setAppConfig((p) => ({ ...p, proContractorPrice: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-emerald-400" />
+                                            <input type="number" value={appConfig.proContractorPrice ?? 25000} onChange={(e) => updateAppConfigFields({ proContractorPrice: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-emerald-400" />
                                         </div>
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">اشتراك المقاول السنوي (د.ع)</label>
-                                            <input type="number" value={appConfig.proContractorAnnualPrice ?? 250000} onChange={(e) => setAppConfig((p) => ({ ...p, proContractorAnnualPrice: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-emerald-400" />
+                                            <input type="number" value={appConfig.proContractorAnnualPrice ?? 250000} onChange={(e) => updateAppConfigFields({ proContractorAnnualPrice: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-emerald-400" />
                                         </div>
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">رقم واتساب الإدارة للاشتراكات</label>
-                                            <input type="text" value={appConfig.subscriptionWhatsapp || ''} onChange={(e) => setAppConfig((p) => ({ ...p, subscriptionWhatsapp: e.target.value }))} placeholder="0770XXXXXXX" className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-mono text-white" />
+                                            <input type="text" dir="ltr" value={appConfig.subscriptionWhatsapp ?? ''} onChange={(e) => updateAppConfigFields({ subscriptionWhatsapp: e.target.value })} placeholder="0770XXXXXXX" className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-mono text-white" />
                                         </div>
                                     </div>
 
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">توثيق العامل شهري</label>
-                                            <input type="number" value={appConfig.verifiedWorkerPrice ?? 5000} onChange={(e) => setAppConfig((p) => ({ ...p, verifiedWorkerPrice: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-amber-300" />
+                                            <input type="number" value={appConfig.verifiedWorkerPrice ?? 5000} onChange={(e) => updateAppConfigFields({ verifiedWorkerPrice: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-amber-300" />
                                         </div>
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">توثيق العامل سنوي</label>
-                                            <input type="number" value={appConfig.verifiedWorkerAnnualPrice ?? 50000} onChange={(e) => setAppConfig((p) => ({ ...p, verifiedWorkerAnnualPrice: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-amber-300" />
+                                            <input type="number" value={appConfig.verifiedWorkerAnnualPrice ?? 50000} onChange={(e) => updateAppConfigFields({ verifiedWorkerAnnualPrice: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-amber-300" />
                                         </div>
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">اشتراك المعرض VIP شهري</label>
-                                            <input type="number" value={appConfig.proStorePrice ?? 75000} onChange={(e) => setAppConfig((p) => ({ ...p, proStorePrice: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-indigo-300" />
+                                            <input type="number" value={appConfig.proStorePrice ?? 75000} onChange={(e) => updateAppConfigFields({ proStorePrice: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-indigo-300" />
                                         </div>
                                         <div>
                                             <label className="text-[11px] font-bold text-slate-400 block mb-1">اشتراك المعرض VIP سنوي</label>
-                                            <input type="number" value={appConfig.proStoreAnnualPrice ?? 750000} onChange={(e) => setAppConfig((p) => ({ ...p, proStoreAnnualPrice: e.target.value }))} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-indigo-300" />
+                                            <input type="number" value={appConfig.proStoreAnnualPrice ?? 750000} onChange={(e) => updateAppConfigFields({ proStoreAnnualPrice: e.target.value })} className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-sm font-black text-indigo-300" />
                                         </div>
                                     </div>
 

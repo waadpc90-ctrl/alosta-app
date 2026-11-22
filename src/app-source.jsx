@@ -236,6 +236,13 @@
                     } else if (v && v.__smartOp === 'ARRAY_REMOVE') {
                         const arr = Array.isArray(base[k]) ? base[k] : [];
                         base[k] = arr.filter(item => item !== v.val);
+                    } else if (
+                        merge &&
+                        v && typeof v === 'object' && !Array.isArray(v) &&
+                        Object.getPrototypeOf(v) === Object.prototype &&
+                        base[k] && typeof base[k] === 'object' && !Array.isArray(base[k])
+                    ) {
+                        base[k] = applyChangesToLocal(base[k], v, true);
                     } else {
                         base[k] = v;
                     }
@@ -4353,9 +4360,15 @@
             const [data, setData] = useState({ projects: [], workers: [], globalWorkers: [], expenses: [], payments: [], advances: [], attendance: [], requests: [], marketRequests: [], jobAds: [], stores: [], storeProducts: [], storeOrders: [] });
             const [rawWorkersList, setRawWorkersList] = useState([]);
             const [workerTelemetryMap, setWorkerTelemetryMap] = useState({});
+            // Smart On-Demand Crew Telemetry Board (`worker_telemetry/crew_<adminId>`) + 5-min Live Radar Lease
+            const [telemetryLiveUntil, setTelemetryLiveUntil] = useState(0);
+            const [telemetryLastFetchAt, setTelemetryLastFetchAt] = useState(0);
+            const [telemetrySyncing, setTelemetrySyncing] = useState(false);
+            const telemetryLastFetchRef = useRef(0);
+            const telemetryLegacyCheckRef = useRef(0);
             const [isInitialSyncing, setIsInitialSyncing] = useState(true);
             const [marketLoading, setMarketLoading] = useState(false);
-            const [dbQueryLimit, setDbQueryLimit] = useState(600);
+            const [dbQueryLimit, setDbQueryLimit] = useState(300);
             const [ledgerArchiveLoaded, setLedgerArchiveLoaded] = useState(false);
             const [storesFetchLimit, setStoresFetchLimit] = useState(60);
             const [storeProductsFetchLimit, setStoreProductsFetchLimit] = useState(100);
@@ -4395,9 +4408,10 @@
             useEffect(() => {
                 if (view !== 'workers' && view !== 'attendance') return;
                 setActivityNowMs(Date.now());
-                const ticker = setInterval(() => setActivityNowMs(Date.now()), 30000);
+                const stepMs = telemetryLiveUntil > Date.now() ? 1000 : 30000;
+                const ticker = setInterval(() => setActivityNowMs(Date.now()), stepMs);
                 return () => clearInterval(ticker);
-            }, [view]);
+            }, [view, telemetryLiveUntil]);
             const [settleExpenseTarget, setSettleExpenseTarget] = useState(null);
             const [settleLiquidityInput, setSettleLiquidityInput] = useState('');
             const [settleLiquidityNote, setSettleLiquidityNote] = useState('');
@@ -4674,12 +4688,8 @@
                     db.collection('workers').where('adminId', '==', adminId).onSnapshot(s => {
                         setRawWorkersList(s.docs.map(x => ({ id: x.id, ...x.data() })));
                     }),
-                    // Dedicated high-frequency telemetry stream scoped strictly to THIS contractor's staff
-                    db.collection('worker_telemetry').where('adminId', '==', adminId).onSnapshot(s => {
-                        const map = {};
-                        s.docs.forEach(x => { map[x.id] = x.data() || {}; });
-                        setWorkerTelemetryMap(map);
-                    }),
+                    // NOTE: Permanent `worker_telemetry` collection listener REMOVED to cut telemetry reads by ~95%!
+                    // Replaced below by O(1) Single-Doc Crew Board (`worker_telemetry/crew_<adminId>`) + On-Demand Live Radar Lease.
                     applyLimit(db.collection('expenses').where('adminId', '==', adminId)).onSnapshot(s => setData(p => ({ ...p, expenses: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
                     applyLimit(db.collection('payments').where('adminId', '==', adminId)).onSnapshot(s => setData(p => ({ ...p, payments: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
                     applyLimit(db.collection('advances').where('adminId', '==', adminId)).onSnapshot(s => setData(p => ({ ...p, advances: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
@@ -4687,10 +4697,10 @@
                         const raw = s.docs.map(x => ({ id: x.id, ...x.data() }));
                         setData(p => ({ ...p, attendance: dedupeAttendanceByWorkerDay(raw, true) }));
                     }),
-                    db.collection('notifications').where('adminId', '==', adminId).limit(150).onSnapshot(s => setData(p => ({ ...p, requests: s.docs.map(x => ({ id: x.id, ...x.data() })).filter(r => r.status === 'unread') }))),
-                    db.collection('market_requests').where('adminId', '==', adminId).limit(150).onSnapshot(s => setData(p => ({ ...p, marketRequests: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('job_ads').where('adminId', '==', adminId).limit(100).onSnapshot(s => setData(p => ({ ...p, jobAds: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('store_orders').where('adminId', '==', adminId).limit(200).onSnapshot(s => setData(p => ({ ...p, storeOrders: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('notifications').where('adminId', '==', adminId).limit(80).onSnapshot(s => setData(p => ({ ...p, requests: s.docs.map(x => ({ id: x.id, ...x.data() })).filter(r => r.status === 'unread') }))),
+                    db.collection('market_requests').where('adminId', '==', adminId).limit(80).onSnapshot(s => setData(p => ({ ...p, marketRequests: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('job_ads').where('adminId', '==', adminId).limit(60).onSnapshot(s => setData(p => ({ ...p, jobAds: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('store_orders').where('adminId', '==', adminId).limit(100).onSnapshot(s => setData(p => ({ ...p, storeOrders: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
                     // Singleton shared AppConfig listener (eliminates 3x duplicate `settings/app_config` reads)
                     window.AlOstaAppConfigBus
                         ? window.AlOstaAppConfigBus.subscribe(db, cfg => setAppSettings(prev => ({ ...prev, ...cfg })))
@@ -4720,6 +4730,134 @@
                     unsubs.forEach(u => u && u());
                 };
             }, [adminId, dbQueryLimit, ledgerArchiveLoaded]);
+
+            // =========================================================================
+            // O(1) SMART CREW TELEMETRY BOARD (`worker_telemetry/crew_<adminId>`)
+            // Reads 1 single document for ALL workers (5, 20, or 100!) instead of N×200 live reads/day.
+            // =========================================================================
+            const crewBoardDocId = `crew_${adminId}`;
+            const activeOnShiftWorkerIds = useMemo(() => {
+                const td = todayStr();
+                return (data.attendance || [])
+                    .filter(a => a && a.date === td && a.timeIn && !a.timeOut && a.status !== 'absent' && a.workerId)
+                    .map(a => a.workerId);
+            }, [data.attendance]);
+
+            const fetchCrewTelemetryOnce = async (forceRefresh = false, wakeWorkers = false) => {
+                if (!db || !adminId) return;
+                const nowMs = Date.now();
+                // 3-minute smart cache TTL minimizes reads on tab switches (manual Sync / Live Radar bypasses immediately)
+                if (!forceRefresh && (nowMs - telemetryLastFetchRef.current) < 180000) return;
+                telemetryLastFetchRef.current = nowMs;
+                setTelemetrySyncing(true);
+                try {
+                    const boardSnap = await db.collection('worker_telemetry').doc(crewBoardDocId).get(
+                        forceRefresh ? { source: 'server', timeoutMs: 5000 } : undefined
+                    );
+                    let nextMap = {};
+                    if (boardSnap && boardSnap.exists) {
+                        const bData = boardSnap.data() || {};
+                        if (bData.workers && typeof bData.workers === 'object') {
+                            nextMap = { ...bData.workers };
+                        }
+                    }
+                    // Backward-compatible fallback for workers still on older APK versions (runs at most once per 5 min)
+                    const missingOnShift = activeOnShiftWorkerIds.some(wid => !nextMap[wid] || nextMap[wid].todayEffortDate !== todayStr());
+                    if ((missingOnShift || Object.keys(nextMap).length === 0) && (forceRefresh || (nowMs - telemetryLegacyCheckRef.current) > 300000)) {
+                        telemetryLegacyCheckRef.current = nowMs;
+                        try {
+                            const legacySnap = await db.collection('worker_telemetry').where('adminId', '==', adminId).limit(100).get();
+                            if (legacySnap && legacySnap.docs) {
+                                legacySnap.docs.forEach(d => {
+                                    if (d.id === crewBoardDocId || d.id.startsWith('crew_')) return;
+                                    const ld = d.data() || {};
+                                    const existing = nextMap[d.id];
+                                    if (!existing || Number(ld.lastHeartbeatAt || 0) > Number(existing.lastHeartbeatAt || 0)) {
+                                        nextMap[d.id] = ld;
+                                    }
+                                });
+                            }
+                        } catch (e) {}
+                    }
+                    setWorkerTelemetryMap(prev => ({ ...prev, ...nextMap }));
+                    setTelemetryLastFetchAt(Date.now());
+                    // Optional on-demand wake ping: asks active clocked-in workers to flush exact steps immediately
+                    if (wakeWorkers && activeOnShiftWorkerIds.length > 0) {
+                        const shortLeaseUntil = Date.now() + 90000;
+                        activeOnShiftWorkerIds.slice(0, 40).forEach(wid => {
+                            db.collection('worker_telemetry').doc(wid).set({ watchUntil: shortLeaseUntil, lastPingAt: Date.now() }, { merge: true }).catch(() => {});
+                        });
+                    }
+                } catch (e) {
+                } finally {
+                    setTelemetrySyncing(false);
+                }
+            };
+
+            const activateLiveRadar = (durationMs = 5 * 60 * 1000) => {
+                haptic();
+                const until = Date.now() + durationMs;
+                setTelemetryLiveUntil(until);
+                // Notify currently clocked-in workers to enter 5-min Turbo Precision Mode
+                if (db && activeOnShiftWorkerIds.length > 0) {
+                    activeOnShiftWorkerIds.slice(0, 50).forEach(wid => {
+                        db.collection('worker_telemetry').doc(wid).set({ watchUntil: until, lastPingAt: Date.now() }, { merge: true }).catch(() => {});
+                    });
+                }
+                addToast(lang === 'ar' ? '📡 تم تفعيل الرادار المباشر لمدة 5 دقائق (قراءة واحدة فقط للطاقم)' : '📡 Live Radar active for 5 min (Single-Doc mode)');
+            };
+
+            const stopLiveRadar = () => {
+                haptic();
+                setTelemetryLiveUntil(0);
+                addToast(lang === 'ar' ? '🌿 تم العودة للوضع الاقتصادي الذكي' : '🌿 Returned to Smart Eco Mode');
+            };
+
+            // Visibility + View-Scoped Telemetry Effect (ZERO reads on Stores / Market / Payroll / Background!)
+            useEffect(() => {
+                if (!db || !adminId) return;
+                const isCrewView = (view === 'workers' || view === 'attendance' || view === 'project');
+                if (!isCrewView) return;
+
+                const nowMs = Date.now();
+                const isRadarLive = telemetryLiveUntil > nowMs;
+
+                if (!isRadarLive) {
+                    if (!document.hidden) {
+                        fetchCrewTelemetryOnce(false, false);
+                    }
+                    const onVis = () => {
+                        if (!document.hidden) fetchCrewTelemetryOnce(false, false);
+                    };
+                    document.addEventListener('visibilitychange', onVis);
+                    return () => document.removeEventListener('visibilitychange', onVis);
+                }
+
+                // Live Radar active -> 1 SINGLE-DOC listener on `worker_telemetry/crew_<adminId>` with hard auto-expiry!
+                const remainingMs = Math.max(1000, telemetryLiveUntil - nowMs);
+                const unsubBoard = db.collection('worker_telemetry').doc(crewBoardDocId).onSnapshot(docSnap => {
+                    if (docSnap && docSnap.exists) {
+                        const bData = docSnap.data() || {};
+                        if (bData.workers && typeof bData.workers === 'object') {
+                            setWorkerTelemetryMap(prev => ({ ...prev, ...bData.workers }));
+                            setTelemetryLastFetchAt(Date.now());
+                            telemetryLastFetchRef.current = Date.now();
+                        }
+                    }
+                });
+                const expiryTimer = setTimeout(() => {
+                    setTelemetryLiveUntil(0);
+                }, remainingMs);
+                const onVisHide = () => {
+                    if (document.hidden) setTelemetryLiveUntil(0);
+                };
+                document.addEventListener('visibilitychange', onVisHide);
+                return () => {
+                    clearTimeout(expiryTimer);
+                    document.removeEventListener('visibilitychange', onVisHide);
+                    if (unsubBoard) unsubBoard();
+                };
+            }, [adminId, view, telemetryLiveUntil, activeOnShiftWorkerIds.length]);
 
             // Scalable paginated Stores listener (no 150 hard cap — expands cleanly on demand)
             useEffect(() => {
@@ -5838,6 +5976,16 @@
                         todayStepEngineV2: true
                     };
                     await db.collection('worker_telemetry').doc(workerObj.id).set(resetPayload, { merge: true });
+                    const targetCrewAdmin = workerObj.adminId || adminId;
+                    if (targetCrewAdmin) {
+                        db.collection('worker_telemetry').doc(`crew_${targetCrewAdmin}`).set({
+                            adminId: targetCrewAdmin,
+                            isCrewBoard: true,
+                            updatedAt: Date.now(),
+                            workers: { [workerObj.id]: resetPayload }
+                        }, { merge: true }).catch(() => {});
+                    }
+                    setWorkerTelemetryMap(prev => ({ ...prev, [workerObj.id]: resetPayload }));
                     const targetAtt = attRecord || data.attendance.find(a => a.workerId === workerObj.id && a.date === todayStr());
                     if (targetAtt?.id) {
                         await db.collection('attendance').doc(targetAtt.id).update({
@@ -8474,16 +8622,55 @@
                                         ? window.AlOstaActivityEngine.summarizeCrewActivity(data.workers || [], data.attendance || [], activityNowMs, todayStr(), lang)
                                         : null;
                                     if (!crewSum || crewSum.onShiftTotal <= 0) return null;
+                                    const isRadarLive = telemetryLiveUntil > activityNowMs;
+                                    const radarRemainSec = isRadarLive ? Math.max(0, Math.ceil((telemetryLiveUntil - activityNowMs) / 1000)) : 0;
+                                    const radarTimerText = `${Math.floor(radarRemainSec / 60)}:${String(radarRemainSec % 60).padStart(2, '0')}`;
                                     return (
                                         <div className="bg-white dark:bg-slate-800 p-3 rounded-2xl border border-indigo-100 dark:border-slate-700 shadow-xs space-y-2">
-                                            <div className="flex items-center justify-between">
+                                            <div className="flex flex-wrap items-center justify-between gap-2">
                                                 <span className="text-[11px] font-black text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
-                                                    <Icon name="activity" size={14} className="text-indigo-600 dark:text-indigo-400" />
-                                                    <span>{lang === 'ar' ? `مراقبة نشاط الكادر المباشرة (${crewSum.onShiftTotal} في المناوبة)` : `Live Crew Activity (${crewSum.onShiftTotal} On Shift)`}</span>
+                                                    <Icon name="activity" size={14} className={isRadarLive ? 'text-emerald-500 animate-pulse' : 'text-indigo-600 dark:text-indigo-400'} />
+                                                    <span>{lang === 'ar' ? `مراقبة نشاط الكادر (${crewSum.onShiftTotal} في المناوبة)` : `Crew Activity (${crewSum.onShiftTotal} On Shift)`}</span>
                                                 </span>
-                                                <span className="text-[9px] font-bold text-slate-400">
-                                                    {lang === 'ar' ? 'تحديث تلقائي' : 'Auto-live'}
+                                                <div className="flex items-center gap-1.5">
+                                                    <button
+                                                        type="button"
+                                                        disabled={telemetrySyncing}
+                                                        onClick={() => fetchCrewTelemetryOnce(true, true)}
+                                                        className="px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[9.5px] font-black text-slate-700 dark:text-slate-200 active:scale-95"
+                                                    >
+                                                        {telemetrySyncing ? (lang === 'ar' ? 'جاري...' : '...') : (lang === 'ar' ? '🔄 تحديث' : '🔄 Sync')}
+                                                    </button>
+                                                    {isRadarLive ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={stopLiveRadar}
+                                                            className="px-2 py-1 rounded-lg bg-emerald-600 text-white text-[9.5px] font-black shadow-2xs active:scale-95"
+                                                        >
+                                                            📡 {lang === 'ar' ? `مباشر ${radarTimerText}` : `LIVE ${radarTimerText}`} ✕
+                                                        </button>
+                                                    ) : (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => activateLiveRadar(5 * 60 * 1000)}
+                                                            className="px-2 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-900/40 border border-indigo-200 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 text-[9.5px] font-black active:scale-95"
+                                                        >
+                                                            {lang === 'ar' ? '📡 رادار مباشر (5د)' : '📡 Live Radar (5m)'}
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center justify-between text-[9px] font-bold text-slate-400 px-0.5">
+                                                <span>
+                                                    {isRadarLive
+                                                        ? (lang === 'ar' ? '⚡ وضع الرادار المباشر نشط — بث لحظي من لوحة الطاقم الموحّدة' : '⚡ Live Radar active — Single-Doc real-time board')
+                                                        : (lang === 'ar' ? '🌿 الوضع الاقتصادي الذكي (قراءة واحدة لكل الطاقم — وفر 95%)' : '🌿 Smart Eco Mode (1 single read for entire crew — 95% savings)')}
                                                 </span>
+                                                {telemetryLastFetchAt > 0 && (
+                                                    <span className="font-mono" dir="ltr">
+                                                        {new Date(telemetryLastFetchAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                    </span>
+                                                )}
                                             </div>
                                             <div className="grid grid-cols-4 gap-1.5 text-center text-[10px] font-black">
                                                 <div className="bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 py-1.5 px-1 rounded-xl border border-emerald-200/70 dark:border-emerald-800/60">
@@ -8754,6 +8941,37 @@
                                             <Icon name={lang === 'ar' ? 'chevron-left' : 'chevron-right'} size={16} />
                                         </button>
                                     </div>
+                                    {selectedDate === todayStr() && activeOnShiftWorkerIds.length > 0 && (() => {
+                                        const isRadarLive = telemetryLiveUntil > activityNowMs;
+                                        const radarRemainSec = isRadarLive ? Math.max(0, Math.ceil((telemetryLiveUntil - activityNowMs) / 1000)) : 0;
+                                        const radarTimerText = `${Math.floor(radarRemainSec / 60)}:${String(radarRemainSec % 60).padStart(2, '0')}`;
+                                        return (
+                                            <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-slate-100 dark:border-slate-700/70">
+                                                <span className="text-[9.5px] font-black text-slate-500 dark:text-slate-400">
+                                                    {isRadarLive
+                                                        ? (lang === 'ar' ? `📡 رادار مباشر نشط (${radarTimerText})` : `📡 Live Radar (${radarTimerText})`)
+                                                        : (lang === 'ar' ? `🌿 تتبع اقتصادي ذكي (${activeOnShiftWorkerIds.length} بالموقع)` : `🌿 Smart Eco Tracking (${activeOnShiftWorkerIds.length} on site)`)}
+                                                </span>
+                                                <div className="flex items-center gap-1.5">
+                                                    <button
+                                                        type="button"
+                                                        disabled={telemetrySyncing}
+                                                        onClick={() => fetchCrewTelemetryOnce(true, true)}
+                                                        className="px-2 py-1 rounded-lg bg-slate-100 dark:bg-slate-900 text-[9.5px] font-black text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700"
+                                                    >
+                                                        {telemetrySyncing ? '...' : (lang === 'ar' ? '🔄 تحديث' : '🔄 Sync')}
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => isRadarLive ? stopLiveRadar() : activateLiveRadar(5 * 60 * 1000)}
+                                                        className={`px-2 py-1 rounded-lg text-[9.5px] font-black ${isRadarLive ? 'bg-emerald-600 text-white' : 'bg-indigo-50 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-700'}`}
+                                                    >
+                                                        {isRadarLive ? (lang === 'ar' ? 'إيقاف ✕' : 'Stop ✕') : (lang === 'ar' ? '📡 رادار 5د' : '📡 Radar 5m')}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
 
                                     <div className="flex items-center justify-between gap-2">
                                         <div className="flex gap-1.5">
@@ -11241,6 +11459,10 @@
 
             const [workerSyncing, setWorkerSyncing] = useState(true);
             const [jobAdsFetchLimit, setJobAdsFetchLimit] = useState(50);
+            const [workerHistoryLimit, setWorkerHistoryLimit] = useState(90);
+            const workerWatchUntilRef = useRef(0);
+            const lastSyncedMotionStateRef = useRef('');
+            const forceSyncStepsRef = useRef(null);
 
             useEffect(() => {
                 const wSyncTimer = setTimeout(() => setWorkerSyncing(false), 600);
@@ -11250,18 +11472,30 @@
                         if (doc.exists) setLW(prev => ({ ...prev, id: doc.id, ...doc.data() }));
                         setWorkerSyncing(false);
                     }),
+                    // Quiet control channel: stays silent during Eco Mode (0 reads/day!), wakes worker ONLY when contractor starts Live Radar
                     db.collection('worker_telemetry').doc(worker.id).onSnapshot(doc => {
-                        if (doc.exists) setLW(prev => ({ ...prev, ...(doc.data() || {}), id: worker.id }));
+                        if (doc.exists) {
+                            const td = doc.data() || {};
+                            const nextWatchUntil = Number(td.watchUntil || 0);
+                            if (nextWatchUntil > Date.now() && nextWatchUntil !== workerWatchUntilRef.current) {
+                                workerWatchUntilRef.current = nextWatchUntil;
+                                if (typeof forceSyncStepsRef.current === 'function') {
+                                    forceSyncStepsRef.current(true);
+                                }
+                            }
+                            setLW(prev => ({ ...prev, ...td, id: worker.id }));
+                        }
                     }),
-                    db.collection('attendance').where('workerId', '==', worker.id).onSnapshot(s => {
+                    // Bounded historical queries prevent multi-year linear read/RAM growth
+                    db.collection('attendance').where('workerId', '==', worker.id).limit(workerHistoryLimit).onSnapshot(s => {
                         const raw = s.docs.map(x => ({ id: x.id, ...x.data() }));
                         const a = dedupeAttendanceByWorkerDay(raw, true);
                         setD(p => ({ ...p, atts: a }));
                         setTA(a.find(x => x.date === todayStr()));
                     }),
-                    db.collection('advances').where('workerId', '==', worker.id).onSnapshot(s => setD(p => ({ ...p, advs: s.docs.map(x => x.data()) }))),
-                    db.collection('expenses').where('paidByWorkerId', '==', worker.id).onSnapshot(s => setD(p => ({ ...p, matExps: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
-                    db.collection('projects').where('workerIds', 'array-contains', worker.id).onSnapshot(s => {
+                    db.collection('advances').where('workerId', '==', worker.id).limit(Math.max(120, workerHistoryLimit)).onSnapshot(s => setD(p => ({ ...p, advs: s.docs.map(x => x.data()) }))),
+                    db.collection('expenses').where('paidByWorkerId', '==', worker.id).limit(Math.max(120, workerHistoryLimit)).onSnapshot(s => setD(p => ({ ...p, matExps: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
+                    db.collection('projects').where('workerIds', 'array-contains', worker.id).limit(60).onSnapshot(s => {
                         const assignedProjs = s.docs.map(x => ({ id: x.id, ...x.data() }));
                         setD(p => ({ ...p, assignedProjs }));
                     }),
@@ -11278,7 +11512,7 @@
                 ];
                 if (lW.adminId) {
                     us.push(
-                        db.collection('projects').where('adminId', '==', lW.adminId).onSnapshot(s => {
+                        db.collection('projects').where('adminId', '==', lW.adminId).limit(60).onSnapshot(s => {
                             const adminProjs = s.docs.map(x => ({ id: x.id, ...x.data() }));
                             setD(p => ({ ...p, adminProjs }));
                         })
@@ -11288,7 +11522,7 @@
                     clearTimeout(wSyncTimer);
                     us.forEach(u => u && u());
                 };
-            }, [worker.id, lW.specialty, lW.adminId, jobAdsFetchLimit]);
+            }, [worker.id, lW.specialty, lW.adminId, jobAdsFetchLimit, workerHistoryLimit]);
 
             const allProjects = useMemo(() => {
                 const map = new Map();
@@ -11520,6 +11754,14 @@
                     liveSiteDist: Number.isFinite(initGps.rawDist) ? Math.round(initGps.rawDist) : null
                 };
                 db.collection('worker_telemetry').doc(lW.id).set(initPayload, { merge: true }).catch(() => {});
+                if (telemetryAdminId) {
+                    db.collection('worker_telemetry').doc(`crew_${telemetryAdminId}`).set({
+                        adminId: telemetryAdminId,
+                        isCrewBoard: true,
+                        updatedAt: initNowMs,
+                        workers: { [lW.id]: initPayload }
+                    }, { merge: true }).catch(() => {});
+                }
                 if (tA?.id) {
                     db.collection('attendance').doc(tA.id).update({
                         stepEngineV2: true,
@@ -11539,7 +11781,7 @@
                     const currentSteps = Math.max(m.steps || 0, verifiedRecSteps);
                     const recActiveMin = (tA && tA.stepEngineV2 === true) ? (parseInt(tA.activeMinutes) || 0) : 0;
                     const currentActiveMin = Math.max(m.activeMinutes || 0, recActiveMin);
-                    // Live local UI update (0 cloud cost)
+                    // Live local UI update (100% precision every 2.5s at 0 cloud cost)
                     setStepMetrics({ ...m, steps: currentSteps, activeMinutes: currentActiveMin });
 
                     const eff = getEffortInfo(currentSteps, lang, lW.specialty || '', currentActiveMin);
@@ -11551,58 +11793,86 @@
                     const nowMs = Date.now();
                     const elapsedSinceSync = nowMs - lastCloudSyncTime;
 
-                    // Precision heartbeat & batch sync -> writes ONLY to isolated `worker_telemetry/{workerId}` (ZERO Labor Market fanout!)
-                    const shouldWriteCloud = (
-                        forceSync ||
-                        inBoundsChanged ||
-                        stepDelta >= 40 ||
-                        (stepDelta >= 10 && elapsedSinceSync >= 60000) ||
-                        (activeMinDelta >= 3 && elapsedSinceSync >= 90000) ||
-                        elapsedSinceSync >= 240000
-                    );
+                    const lastStepAt = Math.max(Number(m.lastStepAt || 0), Number(tA?.lastStepAt || 0));
+                    const lastMotionAt = Math.max(Number(m.lastMotionAt || 0), lastStepAt, Number(tA?.lastMotionAt || 0));
+                    const recentSteps10m = Math.max(0, parseInt(m.recentSteps10m, 10) || 0);
+                    const motionState = m.motionState || (lastMotionAt > 0 && (nowMs - lastMotionAt) <= 600000 ? 'active' : 'idle');
+                    const motionStateChanged = Boolean(lastSyncedMotionStateRef.current && lastSyncedMotionStateRef.current !== motionState);
+                    const isTurboWatched = workerWatchUntilRef.current > nowMs;
+
+                    // Ultra-Eco Free-Tier + Turbo Adaptive Sync (cuts daily worker writes by ~90% -> ~22-28 writes/day = ~800-1,000 free active workers/day!):
+                    // - Ultra-Eco Mode (default): instant on geofence/state change, or >=350 steps (>=8m), or 16-min heartbeat (safely inside 22m offline window)
+                    // - Turbo Mode (contractor activated 5-min Live Radar): every 40 steps or 45s -> full real-time accuracy!
+                    const shouldWriteCloud = isTurboWatched
+                        ? (
+                            forceSync ||
+                            inBoundsChanged ||
+                            motionStateChanged ||
+                            stepDelta >= 40 ||
+                            elapsedSinceSync >= 45000
+                        )
+                        : (
+                            forceSync ||
+                            inBoundsChanged ||
+                            motionStateChanged ||
+                            (stepDelta >= 350 && elapsedSinceSync >= 480000) ||
+                            (activeMinDelta >= 12 && elapsedSinceSync >= 600000) ||
+                            elapsedSinceSync >= 960000
+                        );
+
                     if (shouldWriteCloud) {
                         lastSyncedStepsRef.current = currentSteps;
                         lastSyncedActiveMinRef.current = currentActiveMin;
+                        lastSyncedMotionStateRef.current = motionState;
                         if (currentInBounds !== null) lastSyncedInBoundsRef.current = currentInBounds;
                         lastCloudSyncTime = nowMs;
 
-                        const lastStepAt = Math.max(Number(m.lastStepAt || 0), Number(tA?.lastStepAt || 0));
-                        const lastMotionAt = Math.max(Number(m.lastMotionAt || 0), lastStepAt, Number(tA?.lastMotionAt || 0));
-                        const recentSteps10m = Math.max(0, parseInt(m.recentSteps10m, 10) || 0);
-                        const motionState = m.motionState || (lastMotionAt > 0 && (nowMs - lastMotionAt) <= 600000 ? 'active' : 'idle');
                         const siteDistRounded = Number.isFinite(gpsNow.rawDist) ? Math.round(gpsNow.rawDist) : null;
+                        const targetAdminId = activeProject?.adminId || lW.adminId || '';
+                        const telemetryPacket = {
+                            workerId: lW.id,
+                            adminId: targetAdminId,
+                            todaySteps: eff.steps,
+                            todayDistanceMeters: eff.distanceMeters,
+                            todayCalories: eff.calories,
+                            todayEffortScore: eff.effortScore,
+                            todayEffortStars: eff.effortStars,
+                            todayActiveMinutes: currentActiveMin,
+                            todayRecentSteps10m: recentSteps10m,
+                            todayEffortDate: todayStr(),
+                            todayStepEngineV2: true,
+                            sensorConnected: true,
+                            sensorUpdatedAt: nowMs,
+                            lastHeartbeatAt: nowMs,
+                            lastStepAt,
+                            lastMotionAt,
+                            motionState,
+                            syncMode: isTurboWatched ? 'turbo' : 'eco',
+                            ...(currentInBounds !== null ? { liveInBounds: currentInBounds } : {}),
+                            ...(siteDistRounded !== null ? { liveSiteDist: siteDistRounded } : {})
+                        };
 
                         try {
-                            await db.collection('worker_telemetry').doc(lW.id).set({
-                                workerId: lW.id,
-                                adminId: activeProject?.adminId || lW.adminId || '',
-                                todaySteps: eff.steps,
-                                todayDistanceMeters: eff.distanceMeters,
-                                todayCalories: eff.calories,
-                                todayEffortScore: eff.effortScore,
-                                todayEffortStars: eff.effortStars,
-                                todayActiveMinutes: currentActiveMin,
-                                todayRecentSteps10m: recentSteps10m,
-                                todayEffortDate: todayStr(),
-                                todayStepEngineV2: true,
-                                sensorConnected: true,
-                                sensorUpdatedAt: nowMs,
-                                lastHeartbeatAt: nowMs,
-                                lastStepAt,
-                                lastMotionAt,
-                                motionState,
-                                ...(currentInBounds !== null ? { liveInBounds: currentInBounds } : {}),
-                                ...(siteDistRounded !== null ? { liveSiteDist: siteDistRounded } : {})
-                            }, { merge: true });
+                            if (targetAdminId) {
+                                // Write 1 compact packet into Single-Doc Crew Board (`worker_telemetry/crew_<adminId>`)
+                                // Contractor reads ALL workers in 1 single Firestore read, and individual doc stays silent (0 worker self-reads)!
+                                await db.collection('worker_telemetry').doc(`crew_${targetAdminId}`).set({
+                                    adminId: targetAdminId,
+                                    isCrewBoard: true,
+                                    updatedAt: nowMs,
+                                    workers: { [lW.id]: telemetryPacket }
+                                }, { merge: true });
+                                // Mirror to individual doc ONLY on critical geofence breach for legacy APK compatibility
+                                if (inBoundsChanged) {
+                                    db.collection('worker_telemetry').doc(lW.id).set(telemetryPacket, { merge: true }).catch(() => {});
+                                }
+                            } else {
+                                await db.collection('worker_telemetry').doc(lW.id).set(telemetryPacket, { merge: true });
+                            }
 
-                            // Mirror summary to `attendance` only on major milestones (every 10m, >=120 steps, or geofence change) -> cuts daily writes by ~55%!
-                            const shouldSyncAttendance = Boolean(
-                                tA?.id && (
-                                    inBoundsChanged ||
-                                    Math.abs(currentSteps - lastAttendanceSyncSteps) >= 120 ||
-                                    (nowMs - lastAttendanceSyncTime) >= 600000
-                                )
-                            );
+                            // Zero-waste attendance sync: write to `attendance` during shift ONLY on geofence breach!
+                            // Shift start & Shift checkout already save exact initial & final hardware steps/effort (eliminates ~18 redundant writes/worker/day).
+                            const shouldSyncAttendance = Boolean(tA?.id && inBoundsChanged);
                             if (shouldSyncAttendance) {
                                 lastAttendanceSyncTime = nowMs;
                                 lastAttendanceSyncSteps = currentSteps;
@@ -11628,6 +11898,7 @@
                     }
                 };
 
+                forceSyncStepsRef.current = syncSteps;
                 syncSteps(true);
                 const stepInterval = setInterval(() => syncSteps(false), 2500);
                 const handleResume = () => {
@@ -11824,9 +12095,10 @@
                         motionState: 'off_shift',
                         stepEngineV2: true
                     });
-                    db.collection('worker_telemetry').doc(lW.id).set({
+                    const checkoutAdminId = activeProject?.adminId || lW.adminId || '';
+                    const checkoutTelemetry = {
                         workerId: lW.id,
-                        adminId: activeProject?.adminId || lW.adminId || '',
+                        adminId: checkoutAdminId,
                         todaySteps: eff.steps,
                         todayDistanceMeters: eff.distanceMeters,
                         todayCalories: eff.calories,
@@ -11838,7 +12110,16 @@
                         lastHeartbeatAt: Date.now(),
                         todayEffortDate: todayStr(),
                         todayStepEngineV2: true
-                    }, { merge: true }).catch(() => {});
+                    };
+                    db.collection('worker_telemetry').doc(lW.id).set(checkoutTelemetry, { merge: true }).catch(() => {});
+                    if (checkoutAdminId) {
+                        db.collection('worker_telemetry').doc(`crew_${checkoutAdminId}`).set({
+                            adminId: checkoutAdminId,
+                            isCrewBoard: true,
+                            updatedAt: Date.now(),
+                            workers: { [lW.id]: checkoutTelemetry }
+                        }, { merge: true }).catch(() => {});
+                    }
                     if (status === 'invalid' && activeProject) {
                         await db.collection('notifications').add({
                             date: todayStr(),
@@ -13544,7 +13825,7 @@
                             }
                         });
 
-                        unsubProds = db.collection('store_products').where('storeId', '==', targetStore.id).onSnapshot(snap => {
+                        unsubProds = db.collection('store_products').where('storeId', '==', targetStore.id).limit(300).onSnapshot(snap => {
                             const dbList = snap.docs
                                 .map(d => ({ id: d.id, ...d.data() }))
                                 .sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')));
@@ -14119,7 +14400,7 @@
 
             useEffect(() => {
                 if (!db) return;
-                const unsub = db.collection('announcements').onSnapshot(snap => {
+                const unsub = db.collection('announcements').limit(30).onSnapshot(snap => {
                     if (snap.empty) {
                         setAdsQueue([]);
                         return;

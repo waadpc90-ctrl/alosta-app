@@ -5,7 +5,7 @@
 (function (global) {
     'use strict';
 
-    const HEARTBEAT_OFFLINE_MS = 10 * 60 * 1000;   // 10 min without heartbeat -> phone closed / offline
+    const HEARTBEAT_OFFLINE_MS = 22 * 60 * 1000;   // 22 min without heartbeat (comfortably above 16-min Ultra-Eco heartbeat) -> phone closed / offline
     const MOTION_IDLE_MS = 10 * 60 * 1000;          // 10 min without steps or work motion -> idle / break
     const SHIFT_WARMUP_GRACE_MS = 12 * 60 * 1000;   // 12 min grace right after clock-in before flagging idle
 

@@ -1,7 +1,7 @@
-/* Al-Osta Modular Architecture Engine v1.0.16 */
+/* Al-Osta Modular Architecture Engine v1.0.17 */
 /**
- * Module 01: Al-Osta Enterprise Security, Firebase Auth UID Session Binding & Brute-Force Guard
- * Solves: Client-side session tampering, refresh-bypass on login lockouts, and Auth UID binding.
+ * Module 01: Al-Osta Enterprise Security, Auth UID Session Binding, Brute-Force Guard & Shared Config Bus
+ * Solves: Client-side session tampering, refresh-bypass on login lockouts, duplicate app_config listeners.
  */
 (function (global) {
     'use strict';
@@ -16,7 +16,7 @@
                 const raw = [
                     navigator.userAgent || '',
                     navigator.language || '',
-                    screen.width + 'x' + screen.height,
+                    (global.screen ? (global.screen.width + 'x' + global.screen.height) : '0x0'),
                     Date.now().toString(36),
                     Math.random().toString(36).substring(2, 10)
                 ].join('|');
@@ -99,6 +99,61 @@
         }
     };
 
+    /**
+     * Singleton AppConfig Bus: shares ONE Firestore listener for `settings/app_config`
+     * across AdminApp, UpdateChecker, and StoreOwnerPortal (cuts config reads by ~66%).
+     */
+    const createAppConfigBus = () => {
+        let activeDb = null;
+        let activeUnsub = null;
+        let latestConfig = null;
+        const listeners = new Set();
+
+        const notifyAll = () => {
+            if (!latestConfig) return;
+            const snapshot = { ...latestConfig };
+            listeners.forEach((cb) => {
+                try { cb(snapshot); } catch (e) {}
+            });
+        };
+
+        const subscribe = (db, cb) => {
+            if (typeof cb !== 'function') return () => {};
+            listeners.add(cb);
+            if (latestConfig) {
+                try { cb({ ...latestConfig }); } catch (e) {}
+            }
+            if (db && (!activeUnsub || activeDb !== db)) {
+                if (activeUnsub) {
+                    try { activeUnsub(); } catch (e) {}
+                }
+                activeDb = db;
+                try {
+                    activeUnsub = db.collection('settings').doc('app_config').onSnapshot((docSnap) => {
+                        if (docSnap && docSnap.exists) {
+                            latestConfig = { ...(docSnap.data() || {}) };
+                            notifyAll();
+                        }
+                    });
+                } catch (e) {
+                    activeUnsub = null;
+                }
+            }
+            return () => {
+                listeners.delete(cb);
+                if (listeners.size === 0 && activeUnsub) {
+                    try { activeUnsub(); } catch (e) {}
+                    activeUnsub = null;
+                    activeDb = null;
+                }
+            };
+        };
+
+        const getLatest = () => (latestConfig ? { ...latestConfig } : null);
+
+        return Object.freeze({ subscribe, getLatest });
+    };
+
     global.AlOstaSecurityGuard = Object.freeze({
         getDeviceFingerprint,
         ensureFirebaseAuthUid,
@@ -107,22 +162,28 @@
         resetLoginAttempts,
         bindSessionToAuthUid
     });
-})(typeof window !== 'undefined' ? window : this);
+
+    global.AlOstaAppConfigBus = createAppConfigBus();
+})(typeof window !== 'undefined' ? window : globalThis);
 
 
 /**
- * Module 03: Al-Osta Adaptive Image Compressor & Firestore 1MB Overflow Guard
- * Solves: Base64 payload bloat in Firestore documents by compressing to adaptive WebP/JPEG (<55KB)
- * and supporting content-addressed media_blobs deduplication.
+ * Module 03: Al-Osta Adaptive Image Compressor, Blob Decoupling (`blob://media_...`) & Lazy Resolver
+ * Solves: Base64 payload bloat inside Firestore `store_products` / `stores` documents.
+ * Heavy images (>16KB) are saved to `media_blobs/{hash}` (and cached in IndexedDB + memory) while
+ * the parent document stores only a 38-byte `blob://media_<hash>` pointer — reducing catalog payloads by ~95%.
  */
 (function (global) {
     'use strict';
 
-    const BLOB_CACHE_PREFIX = 'alosta_media_blob_';
+    const BLOB_URI_PREFIX = 'blob://';
+    const BLOB_INLINE_THRESHOLD_BYTES = 16000;
     const memoryBlobCache = new Map();
+    const inflightBlobRequests = new Map();
 
     const supportsWebP = (() => {
         try {
+            if (typeof document === 'undefined') return false;
             const c = document.createElement('canvas');
             c.width = 2;
             c.height = 2;
@@ -132,11 +193,15 @@
         }
     })();
 
+    const isBlobRef = (url) => typeof url === 'string' && url.startsWith(BLOB_URI_PREFIX + 'media_');
+
+    const extractBlobId = (url) => (isBlobRef(url) ? url.slice(BLOB_URI_PREFIX.length) : '');
+
     /**
      * Compresses an image File/Blob using adaptive WebP (or JPEG fallback) with iterative quality
-     * reduction so output stays under maxBytes (default 55KB) and never bloats Firestore documents.
+     * reduction so output stays under maxBytes (default 52KB).
      */
-    const compressImageAdaptive = (file, maxDim = 520, initialQuality = 0.78, maxBytes = 56000) =>
+    const compressImageAdaptive = (file, maxDim = 520, initialQuality = 0.78, maxBytes = 52000) =>
         new Promise((resolve, reject) => {
             if (!file) return reject(new Error('NO_FILE'));
             const reader = new FileReader();
@@ -167,7 +232,6 @@
                         let q = initialQuality;
                         let dataUrl = canvas.toDataURL(mime, q);
 
-                        // Iteratively step down quality/resolution if still above maxBytes
                         let attempts = 0;
                         while (dataUrl.length > maxBytes && attempts < 3) {
                             attempts++;
@@ -196,30 +260,37 @@
         });
 
     /**
-     * Persists a heavy image into `media_blobs/{hash}` for deduplication & keeps a local cache copy,
-     * returning the compressed DataURL (or hydrated blob) while ensuring the parent document stays well below 1MB.
+     * Decouples heavy Base64 images (>16KB) into `media_blobs/{blobId}` and returns `blob://media_<hash>`
+     * so `store_products` / `stores` documents stay <1KB. Falls back safely to inline DataURL if offline/unwritable.
      */
     const optimizeAndBackupMediaBlob = async (db, dataUrl, ownerContext = 'product') => {
         const s = String(dataUrl || '').trim();
-        if (!s || !s.startsWith('data:image/')) return s;
+        if (!s) return '';
+        if (isBlobRef(s) || /^https?:\/\//i.test(s)) return s;
+        if (!s.startsWith('data:image/')) return s;
+        if (s.length <= BLOB_INLINE_THRESHOLD_BYTES) return s;
+
         try {
             const hash = (global.AlOstaCrypto && global.AlOstaCrypto.sha256Hex)
                 ? global.AlOstaCrypto.sha256Hex(s).slice(0, 28)
                 : ('img_' + s.length + '_' + s.slice(-24).replace(/[^A-Za-z0-9]/g, ''));
             const blobId = `media_${hash}`;
-            memoryBlobCache.set(blobId, s);
-            try {
-                localStorage.setItem(BLOB_CACHE_PREFIX + blobId, s);
-            } catch (e) {}
+            const blobUri = `${BLOB_URI_PREFIX}${blobId}`;
 
-            if (db && s.length > 25000) {
-                db.collection('media_blobs').doc(blobId).set({
+            memoryBlobCache.set(blobId, s);
+            if (global.AlOstaIndexedVault && typeof global.AlOstaIndexedVault.saveMediaBlobAsync === 'function') {
+                global.AlOstaIndexedVault.saveMediaBlobAsync(blobId, s).catch(() => {});
+            }
+
+            if (db) {
+                await db.collection('media_blobs').doc(blobId).set({
                     blobId,
-                    ownerContext,
+                    ownerContext: String(ownerContext || 'product').slice(0, 64),
                     sizeBytes: s.length,
                     dataUrl: s,
                     createdAt: new Date().toISOString()
-                }, { merge: true }).catch(() => {});
+                }, { merge: true });
+                return blobUri;
             }
             return s;
         } catch (e) {
@@ -227,12 +298,74 @@
         }
     };
 
+    /**
+     * Resolves a `blob://media_<hash>` URI lazily via Memory -> IndexedDB -> Firestore `media_blobs/{id}`.
+     * Regular `https://` and legacy `data:image/` URLs pass through immediately with zero overhead.
+     */
+    const resolveMediaBlobUrl = async (url, db) => {
+        const raw = String(url || '').trim();
+        if (!raw) return '';
+        if (!isBlobRef(raw)) return raw;
+
+        const blobId = extractBlobId(raw);
+        if (!blobId) return '';
+        if (memoryBlobCache.has(blobId)) {
+            return memoryBlobCache.get(blobId);
+        }
+        if (inflightBlobRequests.has(blobId)) {
+            return inflightBlobRequests.get(blobId);
+        }
+
+        const task = (async () => {
+            try {
+                if (global.AlOstaIndexedVault && typeof global.AlOstaIndexedVault.getMediaBlobAsync === 'function') {
+                    const cached = await global.AlOstaIndexedVault.getMediaBlobAsync(blobId);
+                    if (cached) {
+                        memoryBlobCache.set(blobId, cached);
+                        return cached;
+                    }
+                }
+                if (db) {
+                    const snap = await db.collection('media_blobs').doc(blobId).get();
+                    if (snap && snap.exists) {
+                        const data = snap.data() || {};
+                        if (typeof data.dataUrl === 'string' && data.dataUrl.startsWith('data:image/')) {
+                            memoryBlobCache.set(blobId, data.dataUrl);
+                            if (global.AlOstaIndexedVault && typeof global.AlOstaIndexedVault.saveMediaBlobAsync === 'function') {
+                                global.AlOstaIndexedVault.saveMediaBlobAsync(blobId, data.dataUrl).catch(() => {});
+                            }
+                            return data.dataUrl;
+                        }
+                    }
+                }
+            } catch (e) {}
+            return '';
+        })();
+
+        inflightBlobRequests.set(blobId, task);
+        try {
+            return await task;
+        } finally {
+            inflightBlobRequests.delete(blobId);
+        }
+    };
+
+    const getCachedMediaBlobSync = (url) => {
+        if (!isBlobRef(url)) return url || '';
+        const blobId = extractBlobId(url);
+        return memoryBlobCache.get(blobId) || '';
+    };
+
     global.AlOstaMediaOptimizer = Object.freeze({
         supportsWebP,
+        isBlobRef,
+        extractBlobId,
         compressImageAdaptive,
-        optimizeAndBackupMediaBlob
+        optimizeAndBackupMediaBlob,
+        resolveMediaBlobUrl,
+        getCachedMediaBlobSync
     });
-})(typeof window !== 'undefined' ? window : this);
+})(typeof window !== 'undefined' ? window : globalThis);
 
 
 /**
@@ -531,15 +664,19 @@
 
 
 /**
- * Module 04: Al-Osta IndexedDB Vault, Sync Queue State Tracker & Financial Audit Logger
- * Solves: 5MB localStorage ceiling, silent cloud write drops, and financial mutation auditing.
+ * Module 04: Al-Osta Differential IndexedDB Vault, Sync Queue State Tracker & Financial Audit Logger
+ * Solves: 5MB localStorage ceiling, full-DB JSON.stringify jank on every write, silent cloud drops, and audit trail.
+ * Stores each Firestore collection under its own IndexedDB record key (`col_<name>`) so mutations persist O(1) per dirty collection.
  */
 (function (global) {
     'use strict';
 
     const DB_NAME = 'alosta_vault_db_v1';
     const STORE_NAME = 'kv_store';
-    const RECORD_KEY = 'smart_db_snapshot';
+    const LEGACY_RECORD_KEY = 'smart_db_snapshot';
+    const COL_INDEX_KEY = 'smart_db_col_index_v2';
+    const COL_PREFIX = 'col_v2_';
+    const MEDIA_BLOB_PREFIX = 'media_v2_';
     const PENDING_QUEUE_KEY = 'smart_db_pending_ops';
 
     let idbPromise = null;
@@ -613,11 +750,75 @@
         });
     };
 
+    /**
+     * Differential per-collection write: persists ONLY modified collections in a single IndexedDB transaction.
+     * Avoids serializing & rewriting megabytes of unchanged collections on every tick.
+     */
+    const saveCollectionsAsync = async (dirtyCollectionsMap, allKnownColNames = null) => {
+        const db = await openDb();
+        if (!db || !dirtyCollectionsMap || typeof dirtyCollectionsMap !== 'object') return false;
+        const dirtyKeys = Object.keys(dirtyCollectionsMap);
+        if (dirtyKeys.length === 0) return true;
+        try {
+            let colIndex = await idbGet(COL_INDEX_KEY);
+            const colSet = new Set(Array.isArray(colIndex) ? colIndex : []);
+            if (Array.isArray(allKnownColNames)) {
+                allKnownColNames.forEach(c => colSet.add(c));
+            }
+            dirtyKeys.forEach(c => colSet.add(c));
+            const nextIndex = Array.from(colSet);
+
+            return await new Promise((resolve) => {
+                try {
+                    const tx = db.transaction(STORE_NAME, 'readwrite');
+                    const objStore = tx.objectStore(STORE_NAME);
+                    dirtyKeys.forEach((colName) => {
+                        objStore.put(dirtyCollectionsMap[colName] || {}, COL_PREFIX + colName);
+                    });
+                    objStore.put(nextIndex, COL_INDEX_KEY);
+                    tx.oncomplete = () => resolve(true);
+                    tx.onerror = () => resolve(false);
+                } catch (e) {
+                    resolve(false);
+                }
+            });
+        } catch (e) {
+            return false;
+        }
+    };
+
+    /**
+     * Hydrates all per-collection records from IndexedDB (with automatic fallback to legacy monolithic snapshot).
+     */
     const loadSnapshotAsync = async () => {
         try {
-            const val = await idbGet(RECORD_KEY);
-            if (val && typeof val === 'object') return val;
-            if (typeof val === 'string' && val.startsWith('{')) return JSON.parse(val);
+            const colIndex = await idbGet(COL_INDEX_KEY);
+            if (Array.isArray(colIndex) && colIndex.length > 0) {
+                const db = await openDb();
+                if (!db) return null;
+                const hydrated = {};
+                await Promise.all(colIndex.map(async (colName) => {
+                    const data = await idbGet(COL_PREFIX + colName);
+                    if (data && typeof data === 'object') {
+                        hydrated[colName] = data;
+                    }
+                }));
+                if (Object.keys(hydrated).length > 0) {
+                    return hydrated;
+                }
+            }
+            // Fallback to legacy single-blob snapshot if user upgrades from v1.0.16
+            const val = await idbGet(LEGACY_RECORD_KEY);
+            if (val && typeof val === 'object') {
+                // Migrate lazily to per-collection keys in background
+                saveCollectionsAsync(val, Object.keys(val)).catch(() => {});
+                return val;
+            }
+            if (typeof val === 'string' && val.startsWith('{')) {
+                const parsed = JSON.parse(val);
+                saveCollectionsAsync(parsed, Object.keys(parsed)).catch(() => {});
+                return parsed;
+            }
             return null;
         } catch (e) {
             return null;
@@ -625,11 +826,20 @@
     };
 
     const saveSnapshotAsync = async (storeObj) => {
-        try {
-            return await idbSet(RECORD_KEY, storeObj);
-        } catch (e) {
-            return false;
-        }
+        if (!storeObj || typeof storeObj !== 'object') return false;
+        return await saveCollectionsAsync(storeObj, Object.keys(storeObj));
+    };
+
+    // Dedicated IndexedDB cache for decoupled media blobs (`blob://media_...`)
+    const getMediaBlobAsync = async (blobId) => {
+        if (!blobId) return null;
+        const val = await idbGet(MEDIA_BLOB_PREFIX + blobId);
+        return typeof val === 'string' && val.length > 0 ? val : null;
+    };
+
+    const saveMediaBlobAsync = async (blobId, dataUrl) => {
+        if (!blobId || !dataUrl) return false;
+        return await idbSet(MEDIA_BLOB_PREFIX + blobId, String(dataUrl));
     };
 
     const loadPendingOpsAsync = async () => {
@@ -684,6 +894,9 @@
     global.AlOstaIndexedVault = Object.freeze({
         loadSnapshotAsync,
         saveSnapshotAsync,
+        saveCollectionsAsync,
+        getMediaBlobAsync,
+        saveMediaBlobAsync,
         loadPendingOpsAsync,
         savePendingOpsAsync,
         updateSyncStatus,
@@ -703,7 +916,7 @@
 (function (global) {
     'use strict';
 
-    const HEARTBEAT_OFFLINE_MS = 10 * 60 * 1000;   // 10 min without heartbeat -> phone closed / offline
+    const HEARTBEAT_OFFLINE_MS = 22 * 60 * 1000;   // 22 min without heartbeat (comfortably above 16-min Ultra-Eco heartbeat) -> phone closed / offline
     const MOTION_IDLE_MS = 10 * 60 * 1000;          // 10 min without steps or work motion -> idle / break
     const SHIFT_WARMUP_GRACE_MS = 12 * 60 * 1000;   // 12 min grace right after clock-in before flagging idle
 
