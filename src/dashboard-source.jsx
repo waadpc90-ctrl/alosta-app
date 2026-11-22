@@ -1,5 +1,5 @@
         // =========================================================================
-        // AL-OSTA PLATFORM CENTRAL DASHBOARD (v1.0.18 — COMPLETE EDITION)
+        // AL-OSTA PLATFORM CENTRAL DASHBOARD (v1.0.19 — COMPLETE EDITION)
         // Full 5-Tab Cloud Administration Suite + StoreOwnerPortal:
         // 1. 👷 المقاولون (admins) — CRUD, Pro Plans, Projects/Workers Count, Password Reset, WhatsApp
         // 2. 🛠️ العمال والحرفيون (workers) — CRUD, Pro Verification, Login Codes, Wages, Ratings
@@ -17,7 +17,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.18";
+        const APP_VERSION = "1.0.19";
         const { useState, useEffect, useMemo, useRef } = React;
 
         const firebaseConfig = {
@@ -2668,7 +2668,7 @@
                     parts[2] = parts[2] + 1;
                     updateAppConfigFields({ latestVersion: parts.slice(0, 3).join('.') });
                 } else {
-                    updateAppConfigFields({ latestVersion: '1.0.19' });
+                    updateAppConfigFields({ latestVersion: '1.0.20' });
                 }
             };
 
