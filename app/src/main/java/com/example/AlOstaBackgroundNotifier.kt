@@ -41,7 +41,10 @@ object AlOstaBackgroundNotifier {
     private const val KEY_LAST_OTA_KEY = "last_ota_notified_key"
 
     private const val JOB_ID = 4901
+    private const val JOB_ID_QUICK = 4902
     private const val PERIODIC_INTERVAL_MS = 15L * 60L * 1000L // 15 minutes (Android JobScheduler min)
+    private const val QUICK_RECHECK_MIN_LATENCY_MS = 45L * 1000L // 45s after app goes background
+    private const val QUICK_RECHECK_MAX_LATENCY_MS = 120L * 1000L // Within 2 min
     private const val GLOBAL_CHECK_COOLDOWN_MS = 60L * 60L * 1000L // Check OTA + announcements once per hour
     private const val MAX_SEEN_IDS = 120
     private const val CHANNEL_ID = "al_osta_notifications"
@@ -98,6 +101,30 @@ object AlOstaBackgroundNotifier {
         }
     }
 
+    /**
+     * Lightweight one-shot check scheduled when the user leaves the app so newly sent worker
+     * notifications arrive within ~1 minute instead of waiting up to 15 minutes for the periodic job.
+     */
+    fun scheduleQuickRecheck(context: Context) {
+        if (context.packageName.contains("dashboard", ignoreCase = true)) return
+        try {
+            val appCtx = context.applicationContext
+            val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val role = prefs.getString(KEY_ROLE, "guest")?.trim().orEmpty()
+            val userId = prefs.getString(KEY_USER_ID, "")?.trim().orEmpty()
+            if (userId.isEmpty() || (role != "contractor" && role != "worker")) return
+
+            val scheduler = appCtx.getSystemService(Context.JOB_SCHEDULER_SERVICE) as? JobScheduler ?: return
+            val component = ComponentName(appCtx, AlOstaBackgroundNotifierService::class.java)
+            val builder = JobInfo.Builder(JOB_ID_QUICK, component)
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .setMinimumLatency(QUICK_RECHECK_MIN_LATENCY_MS)
+                .setOverrideDeadline(QUICK_RECHECK_MAX_LATENCY_MS)
+            scheduler.schedule(builder.build())
+        } catch (_: Exception) {
+        }
+    }
+
     internal fun isVersionNewer(remoteVersion: String, localVersion: String): Boolean {
         val rParts = remoteVersion.trim().removePrefix("v").removePrefix("V")
             .split(".").map { it.toIntOrNull() ?: 0 }
@@ -123,32 +150,69 @@ object AlOstaBackgroundNotifier {
         }
     }
 
-    internal fun formatPersonalAlert(type: String, workerName: String, projectTitle: String, rawMessage: String): Pair<String, String> {
+    internal fun formatPersonalAlert(
+        type: String,
+        workerName: String,
+        projectTitle: String,
+        rawMessage: String,
+        itemName: String = "",
+        costText: String = "",
+        distText: String = ""
+    ): Pair<String, String> {
+        val who = if (workerName.isNotBlank()) workerName else "أحد العمال"
         return when (type.lowercase()) {
             "left_site" -> Pair(
                 "⚠️ تنبيه مغادرة موقع العمل",
                 buildString {
-                    append(if (workerName.isNotBlank()) "العامل $workerName" else "أحد العمال")
-                    append(" غادر نطاق الموقع")
+                    append("العامل $who غادر نطاق الموقع")
                     if (projectTitle.isNotBlank()) append(" ($projectTitle)")
+                    if (distText.isNotBlank()) append(" • المسافة ${distText}م")
                 }
             )
             "worker_material" -> Pair(
-                "🧱 طلب مواد جديد من الموقع",
+                "🧱 فاتورة مواد جديدة من الموقع",
                 if (rawMessage.isNotBlank()) rawMessage
-                else "${if (workerName.isNotBlank()) workerName else "عامل"} أرسل طلب مواد للمراجعة"
+                else buildString {
+                    append("$who أرسل طلب اعتماد مواد")
+                    if (itemName.isNotBlank()) append(": $itemName")
+                    if (costText.isNotBlank()) append(" ($costText د.ع)")
+                    if (projectTitle.isNotBlank()) append(" — $projectTitle")
+                }
+            )
+            "clock_out" -> Pair(
+                "👋 تسجيل انصراف عامل من الموقع",
+                buildString {
+                    append("العامل $who سجّل انصرافه من العمل")
+                    if (projectTitle.isNotBlank()) append(" — $projectTitle")
+                }
+            )
+            "clock_in_verified" -> Pair(
+                "✅ تأكيد تواجد عامل في الموقع",
+                buildString {
+                    append("العامل $who وثّق تواجده عبر GPS")
+                    if (projectTitle.isNotBlank()) append(" — $projectTitle")
+                }
+            )
+            "invite_accepted" -> Pair(
+                "🤝 انضمام عامل جديد لكادرك",
+                if (rawMessage.isNotBlank()) rawMessage
+                else "العامل $who وافق على دعوتك وانضم إلى كادر العمل"
+            )
+            "job_apply" -> Pair(
+                "💼 متقدم جديد على إعلان العمل",
+                if (rawMessage.isNotBlank()) rawMessage
+                else "العامل $who قدّم طلباً للعمل على إعلانك"
             )
             "clock_in", "attendance", "" -> Pair(
                 "📍 طلب تسجيل حضور جديد",
                 buildString {
-                    append(if (workerName.isNotBlank()) "العامل $workerName" else "عامل جديد")
-                    append(" بانتظار موافقتك على الحضور")
+                    append("العامل $who بانتظار موافقتك على الحضور")
                     if (projectTitle.isNotBlank()) append(" — $projectTitle")
                 }
             )
             else -> Pair(
                 "🔔 إشعار جديد من الأسطة",
-                rawMessage.ifBlank { "لديك إشعار جديد داخل تطبيق الأسطة" }
+                rawMessage.ifBlank { "لديك إشعار جديد من $who داخل تطبيق الأسطة" }
             )
         }
     }
@@ -183,12 +247,14 @@ object AlOstaBackgroundNotifier {
             checkGlobalAnnouncements(context, prefs, projectId, role)
         }
 
-        // 2) Check Personal Unread Notifications & Worker Job Offers (every 15 min when signed in)
+        // 2) Check Personal Unread Notifications & Market Requests (every poll when signed in)
         if (userId.isNotEmpty() && (role == "contractor" || role == "worker")) {
             val idToken = getOrRefreshAnonymousIdToken(prefs, apiKey) ?: return
             checkPersonalNotifications(context, prefs, projectId, idToken, role, userId)
             if (role == "worker") {
                 checkWorkerMarketInvites(context, prefs, projectId, idToken, userId)
+            } else if (role == "contractor") {
+                checkContractorJobApplicants(context, prefs, projectId, idToken, userId)
             }
         }
     }
@@ -276,6 +342,49 @@ object AlOstaBackgroundNotifier {
         }
     }
 
+    private fun runFieldEqualQuery(
+        projectId: String,
+        idToken: String,
+        collectionId: String,
+        fieldPath: String,
+        value: String,
+        limit: Int
+    ): List<Pair<String, JSONObject>> {
+        val result = mutableListOf<Pair<String, JSONObject>>()
+        try {
+            val url = "https://firestore.googleapis.com/v1/projects/$projectId/databases/(default)/documents:runQuery"
+            val queryBody = JSONObject().put(
+                "structuredQuery",
+                JSONObject()
+                    .put("from", JSONArray().put(JSONObject().put("collectionId", collectionId)))
+                    .put(
+                        "where",
+                        JSONObject().put(
+                            "fieldFilter",
+                            JSONObject()
+                                .put("field", JSONObject().put("fieldPath", fieldPath))
+                                .put("op", "EQUAL")
+                                .put("value", JSONObject().put("stringValue", value))
+                        )
+                    )
+                    .put("limit", limit)
+            )
+            val resp = httpPostJson(url, queryBody.toString(), idToken) ?: return result
+            val arr = JSONArray(resp)
+            for (i in 0 until arr.length()) {
+                val item = arr.optJSONObject(i) ?: continue
+                val doc = item.optJSONObject("document") ?: continue
+                val docId = doc.optString("name", "").substringAfterLast("/")
+                val fields = doc.optJSONObject("fields") ?: continue
+                if (docId.isNotBlank()) {
+                    result.add(Pair(docId, fields))
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return result
+    }
+
     private fun checkPersonalNotifications(
         context: Context,
         prefs: android.content.SharedPreferences,
@@ -285,37 +394,46 @@ object AlOstaBackgroundNotifier {
         userId: String
     ) {
         try {
-            val filterField = if (role == "contractor") "adminId" else "workerId"
-            val url = "https://firestore.googleapis.com/v1/projects/$projectId/databases/(default)/documents:runQuery"
-            val queryBody = JSONObject().put(
-                "structuredQuery",
-                JSONObject()
-                    .put("from", JSONArray().put(JSONObject().put("collectionId", "notifications")))
-                    .put(
-                        "where",
-                        JSONObject().put(
-                            "fieldFilter",
-                            JSONObject()
-                                .put("field", JSONObject().put("fieldPath", filterField))
-                                .put("op", "EQUAL")
-                                .put("value", JSONObject().put("stringValue", userId))
-                        )
-                    )
-                    .put("limit", 15)
-            )
-            val resp = httpPostJson(url, queryBody.toString(), idToken) ?: return
-            val arr = JSONArray(resp)
+            val mergedDocs = LinkedHashMap<String, JSONObject>()
+            if (role == "contractor") {
+                // Primary zero-index unread inbox (never truncated by historical approved/read notifications!)
+                for ((docId, fields) in runFieldEqualQuery(
+                    projectId, idToken, "notifications", "adminInboxKey", "${userId}__unread", 30
+                )) {
+                    mergedDocs[docId] = fields
+                }
+                // Backward-compatible fallback for workers running older APKs (generous limit=60)
+                for ((docId, fields) in runFieldEqualQuery(
+                    projectId, idToken, "notifications", "adminId", userId, 60
+                )) {
+                    if (!mergedDocs.containsKey(docId)) {
+                        mergedDocs[docId] = fields
+                    }
+                }
+            } else {
+                for ((docId, fields) in runFieldEqualQuery(
+                    projectId, idToken, "notifications", "workerId", userId, 40
+                )) {
+                    mergedDocs[docId] = fields
+                }
+            }
+
+            if (mergedDocs.isEmpty()) return
+
+            // Sort newest first so latest worker events always surface first
+            val sortedEntries = mergedDocs.entries.sortedByDescending { (_, fields) ->
+                maxOf(
+                    readNumberField(fields, "createdAt"),
+                    readNumberField(fields, "timeOut"),
+                    readNumberField(fields, "timeIn")
+                )
+            }
+
             val seen = loadSeenIds(prefs)
             var dirty = false
             var fired = 0
 
-            for (i in 0 until arr.length()) {
-                val item = arr.optJSONObject(i) ?: continue
-                val doc = item.optJSONObject("document") ?: continue
-                val docId = doc.optString("name", "").substringAfterLast("/")
-                val fields = doc.optJSONObject("fields") ?: continue
-                if (docId.isBlank()) continue
-
+            for ((docId, fields) in sortedEntries) {
                 val status = readStringField(fields, "status")
                 if (status != "unread") continue
 
@@ -326,14 +444,58 @@ object AlOstaBackgroundNotifier {
                 val workerName = readStringField(fields, "workerName")
                 val projectTitle = readStringField(fields, "projectTitle")
                 val msg = readStringField(fields, "message").ifBlank { readStringField(fields, "body") }
-                val (title, body) = formatPersonalAlert(type, workerName, projectTitle, msg)
+                val itemName = readStringField(fields, "item")
+                val costNum = readNumberField(fields, "cost")
+                val costText = if (costNum > 0L) String.format(java.util.Locale.US, "%,d", costNum) else ""
+                val distNum = readNumberField(fields, "inDist")
+                val distText = if (distNum > 0L) distNum.toString() else ""
 
-                if (fired < 2) {
+                val (title, body) = formatPersonalAlert(type, workerName, projectTitle, msg, itemName, costText, distText)
+
+                if (fired < 3) {
                     postSystemNotification(context, title, body)
                     fired++
                 }
                 seen.add(dedupeKey)
                 dirty = true
+            }
+
+            if (dirty) saveSeenIds(prefs, seen)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun checkContractorJobApplicants(
+        context: Context,
+        prefs: android.content.SharedPreferences,
+        projectId: String,
+        idToken: String,
+        adminId: String
+    ) {
+        try {
+            val docs = runFieldEqualQuery(projectId, idToken, "market_requests", "adminId", adminId, 30)
+            if (docs.isEmpty()) return
+            val seen = loadSeenIds(prefs)
+            var dirty = false
+
+            for ((docId, fields) in docs) {
+                val fromAd = readBoolField(fields, "fromAd")
+                val status = readStringField(fields, "status")
+                val isRead = readBoolField(fields, "read")
+                if (!fromAd || status != "accepted" || isRead) continue
+
+                val dedupeKey = "app_$docId"
+                if (seen.contains(dedupeKey)) continue
+
+                val workerName = readStringField(fields, "workerName").ifBlank { "عامل" }
+                postSystemNotification(
+                    context,
+                    "💼 متقدم جديد على إعلان العمل",
+                    "العامل $workerName قدّم طلباً للعمل على إعلانك — افتح التطبيق للمراجعة."
+                )
+                seen.add(dedupeKey)
+                dirty = true
+                break
             }
 
             if (dirty) saveSeenIds(prefs, seen)
@@ -433,7 +595,10 @@ object AlOstaBackgroundNotifier {
                         return newId
                     }
                 }
+                // Stale/revoked refresh token — clear so fresh signUp succeeds cleanly below
+                prefs.edit().remove(KEY_REFRESH_TOKEN).remove(KEY_ID_TOKEN).remove(KEY_TOKEN_EXPIRES_AT).apply()
             } catch (_: Exception) {
+                prefs.edit().remove(KEY_REFRESH_TOKEN).remove(KEY_ID_TOKEN).remove(KEY_TOKEN_EXPIRES_AT).apply()
             }
         }
 
@@ -509,6 +674,16 @@ object AlOstaBackgroundNotifier {
     private fun readBoolField(fields: JSONObject, key: String): Boolean {
         val obj = fields.optJSONObject(key) ?: return false
         return obj.optBoolean("booleanValue", false)
+    }
+
+    private fun readNumberField(fields: JSONObject, key: String): Long {
+        val obj = fields.optJSONObject(key) ?: return 0L
+        val intStr = obj.optString("integerValue", "")
+        if (intStr.isNotBlank()) return intStr.toLongOrNull() ?: 0L
+        if (obj.has("doubleValue")) return obj.optDouble("doubleValue", 0.0).toLong()
+        val strVal = obj.optString("stringValue", "")
+        if (strVal.isNotBlank()) return strVal.toLongOrNull() ?: 0L
+        return 0L
     }
 
     private fun loadSeenIds(prefs: android.content.SharedPreferences): MutableList<String> {

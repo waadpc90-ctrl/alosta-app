@@ -213,15 +213,15 @@ test('4. AlOstaCrypto v3 produces unique random-salted hashes, verifies correctl
     assert.equal(C.sanitizeImageUrl('javascript:alert(1)'), '');
 });
 
-test('5. Slim index.html, static pre-compiled Tailwind CSS, Service Worker v1.0.20 Network-First, and synced root PWA files', () => {
+test('5. Slim index.html, static pre-compiled Tailwind CSS, Service Worker v1.0.21 Network-First, and synced root PWA files', () => {
     const assetHtml = fs.readFileSync(path.join(ROOT, 'app/src/main/assets/index.html'), 'utf8');
     const rootHtml = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
     assert.equal(assetHtml, rootHtml, 'Root index.html must match assets index.html');
     assert.ok(assetHtml.length < 40_000, `index.html should be slim (<40KB), got ${assetHtml.length} bytes`);
     assert.ok(!assetHtml.includes('id="app-jsx-bundle"'), 'Inert 1.1MB JSX bundle must be removed from index.html');
-    assert.ok(/const\s+APP_VERSION\s*=\s*"1\.0\.20";/.test(assetHtml), 'Gradle APP_VERSION 1.0.20 marker must exist');
-    assert.ok(assetHtml.includes('./vendor/app-tailwind.css?v=v1_0_20'), 'index.html must load pre-compiled app-tailwind.css');
-    assert.ok(assetHtml.includes('./vendor/app-compiled.js?v=v1_0_20'), 'index.html must load v1_0_20 app-compiled.js');
+    assert.ok(/const\s+APP_VERSION\s*=\s*"1\.0\.21";/.test(assetHtml), 'Gradle APP_VERSION 1.0.21 marker must exist');
+    assert.ok(assetHtml.includes('./vendor/app-tailwind.css?v=v1_0_21'), 'index.html must load pre-compiled app-tailwind.css');
+    assert.ok(assetHtml.includes('./vendor/app-compiled.js?v=v1_0_21'), 'index.html must load v1_0_21 app-compiled.js');
     assert.ok(!assetHtml.includes('tailwindcss.js'), 'Runtime tailwindcss.js script must be removed');
 
     const twCss = fs.readFileSync(path.join(ROOT, 'app/src/main/assets/vendor/app-tailwind.css'), 'utf8');
@@ -232,8 +232,8 @@ test('5. Slim index.html, static pre-compiled Tailwind CSS, Service Worker v1.0.
     const sw = fs.readFileSync(path.join(ROOT, 'app/src/main/assets/sw.js'), 'utf8');
     const rootSw = fs.readFileSync(path.join(ROOT, 'sw.js'), 'utf8');
     assert.equal(sw, rootSw, 'Root sw.js must match assets sw.js');
-    assert.ok(sw.includes('alosta-pwa-v1.0.20'));
-    assert.ok(sw.includes('./vendor/app-tailwind.css?v=v1_0_20'));
+    assert.ok(sw.includes('alosta-pwa-v1.0.21'));
+    assert.ok(sw.includes('./vendor/app-tailwind.css?v=v1_0_21'));
     assert.ok(sw.includes("url.includes('app-compiled.js')"), 'sw.js must use Network-First for app-compiled.js');
     assert.ok(sw.includes("url.includes('dashboard-compiled.js')"), 'sw.js must use Network-First for dashboard-compiled.js');
 
@@ -247,7 +247,7 @@ test('5. Slim index.html, static pre-compiled Tailwind CSS, Service Worker v1.0.
 test('6. Portal server, Kotlin modularization, telemetry isolation, pagination, and worker rating UI are wired', () => {
     // Portal server checks
     const serverSrc = fs.readFileSync(path.join(ROOT, 'portal-server.js'), 'utf8');
-    assert.ok(serverSrc.includes("const PORTAL_VERSION = '1.0.20'"), 'portal-server.js must be v1.0.20');
+    assert.ok(serverSrc.includes("const PORTAL_VERSION = '1.0.21'"), 'portal-server.js must be v1.0.21');
     assert.ok(serverSrc.includes('waadpc90-ctrl.github.io/alosta-app'), 'portal-server.js must point to active alosta-app GitHub Pages repo');
     assert.ok(serverSrc.includes('FIREBASE_ADMIN_TOKEN'), 'portal-server.js must gate Firestore PATCH with admin token');
     assert.ok(!serverSrc.includes("'Access-Control-Allow-Origin': '*'"), 'Wildcard CORS must be removed from portal-server.js');
@@ -264,7 +264,7 @@ test('6. Portal server, Kotlin modularization, telemetry isolation, pagination, 
 
     // App source architecture & UX checks
     const appSrc = fs.readFileSync(path.join(ROOT, 'src/app-source.jsx'), 'utf8');
-    assert.ok(appSrc.includes('const APP_VERSION = "1.0.20";'));
+    assert.ok(appSrc.includes('const APP_VERSION = "1.0.21";'));
     assert.ok(appSrc.includes("collection('worker_telemetry')"), 'Worker telemetry must use isolated collection');
     assert.ok(appSrc.includes('storeProductsFetchLimit'), 'Per-store product pagination must be wired');
     assert.ok(appSrc.includes('storesFetchLimit'), 'Stores pagination must be wired');

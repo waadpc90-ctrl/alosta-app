@@ -3,7 +3,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.20";
+        const APP_VERSION = "1.0.21";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -1527,6 +1527,91 @@
         };
 
         const formatTime = (ts, lang) => ts ? new Date(ts).toLocaleTimeString(lang === 'en' ? 'en-US' : 'ar-IQ', { hour: '2-digit', minute: '2-digit' }) : '--:--';
+
+        const createNotificationDocId = () => {
+            const revTs = String(Math.max(0, 9999999999999 - Date.now())).padStart(13, '0');
+            const rand = Math.random().toString(36).slice(2, 8);
+            return `0_${revTs}_${rand}`;
+        };
+
+        const sendContractorNotification = async (firestoreDb, payload = {}) => {
+            if (!firestoreDb) return false;
+            const cleanAdminId = String(payload.adminId || '').trim();
+            if (!cleanAdminId) return false;
+            const docId = createNotificationDocId();
+            const nowMs = Date.now();
+            await firestoreDb.collection('notifications').doc(docId).set({
+                ...payload,
+                adminId: cleanAdminId,
+                adminInboxKey: `${cleanAdminId}__unread`,
+                status: 'unread',
+                createdAt: payload.createdAt || nowMs,
+                timeIn: payload.timeIn || nowMs
+            });
+            return docId;
+        };
+
+        const formatContractorNotifAlert = (r, lang = 'ar') => {
+            const who = String(r?.workerName || '').trim() || (lang === 'ar' ? 'أحد العمال' : 'Worker');
+            const proj = String(r?.projectTitle || '').trim();
+            const type = String(r?.type || '').toLowerCase();
+            if (type === 'left_site') {
+                return {
+                    title: lang === 'ar' ? '🚨 تنبيه مغادرة موقع العمل' : '🚨 Worker Left Work Site',
+                    body: lang === 'ar'
+                        ? `العامل ${who} غادر نطاق الموقع${proj ? ` (${proj})` : ''}${r?.inDist ? ` • المسافة ${r.inDist}م` : ''}`
+                        : `${who} left the work site${proj ? ` (${proj})` : ''}${r?.inDist ? ` (${r.inDist}m)` : ''}`
+                };
+            }
+            if (type === 'worker_material') {
+                const costNum = Number(r?.cost) || 0;
+                const costStr = costNum > 0 ? `${costNum.toLocaleString('en-US')} د.ع` : '';
+                return {
+                    title: lang === 'ar' ? '🧾 فاتورة مواد جديدة من الموقع' : '🧾 New Worker Material Invoice',
+                    body: lang === 'ar'
+                        ? `${who}: ${r?.item || 'مواد للموقع'}${costStr ? ` (${costStr})` : ''}${proj ? ` — ${proj}` : ''}`
+                        : `${who}: ${r?.item || 'Materials'}${costStr ? ` (${costStr})` : ''}`
+                };
+            }
+            if (type === 'clock_out') {
+                return {
+                    title: lang === 'ar' ? '👋 تسجيل انصراف عامل' : '👋 Worker Clocked Out',
+                    body: lang === 'ar'
+                        ? `العامل ${who} سجّل انصرافه من العمل${proj ? ` — ${proj}` : ''}`
+                        : `${who} clocked out${proj ? ` — ${proj}` : ''}`
+                };
+            }
+            if (type === 'clock_in_verified') {
+                return {
+                    title: lang === 'ar' ? '✅ تأكيد تواجد عامل بالموقع' : '✅ Worker Location Verified',
+                    body: lang === 'ar'
+                        ? `العامل ${who} وثّق تواجده في الموقع عبر GPS${proj ? ` — ${proj}` : ''}`
+                        : `${who} verified presence via GPS${proj ? ` — ${proj}` : ''}`
+                };
+            }
+            if (type === 'invite_accepted') {
+                return {
+                    title: lang === 'ar' ? '🤝 انضمام عامل جديد لكادرك' : '🤝 Worker Joined Your Crew',
+                    body: lang === 'ar'
+                        ? `العامل ${who} وافق على دعوتك وانضم إلى كادر العمل`
+                        : `${who} accepted your invitation and joined your crew`
+                };
+            }
+            if (type === 'job_apply') {
+                return {
+                    title: lang === 'ar' ? '💼 متقدم جديد على إعلان العمل' : '💼 New Job Applicant',
+                    body: lang === 'ar'
+                        ? `العامل ${who} قدّم طلباً للعمل على إعلانك${proj ? ` — ${proj}` : ''}`
+                        : `${who} applied to your job posting`
+                };
+            }
+            return {
+                title: lang === 'ar' ? '📍 طلب تسجيل حضور جديد' : '📍 New Attendance Request',
+                body: lang === 'ar'
+                    ? `العامل ${who} بانتظار موافقتك على الحضور${proj ? ` — ${proj}` : ''}`
+                    : `${who} sent a clock-in request${proj ? ` — ${proj}` : ''}`
+            };
+        };
 
         const useAppNotifications = (unreadCount, title, body) => {
             const prevCount = useRef(unreadCount);
@@ -4697,7 +4782,42 @@
                         const raw = s.docs.map(x => ({ id: x.id, ...x.data() }));
                         setData(p => ({ ...p, attendance: dedupeAttendanceByWorkerDay(raw, true) }));
                     }),
-                    db.collection('notifications').where('adminId', '==', adminId).limit(80).onSnapshot(s => setData(p => ({ ...p, requests: s.docs.map(x => ({ id: x.id, ...x.data() })).filter(r => r.status === 'unread') }))),
+                    // Dual unread inbox: primary single-field `adminInboxKey` (0 composite index, never truncated by old history)
+                    // + legacy `adminId` fallback for workers still on older APKs, merged & deduplicated newest-first.
+                    (() => {
+                        const cleanAdminId = String(adminId || '').trim();
+                        const inboxMap = new Map();
+                        const legacyMap = new Map();
+                        const publishMergedRequests = () => {
+                            const merged = new Map();
+                            legacyMap.forEach((val, key) => { if (val && val.status === 'unread') merged.set(key, val); });
+                            inboxMap.forEach((val, key) => { if (val && val.status === 'unread') merged.set(key, val); });
+                            const sorted = Array.from(merged.values()).sort((a, b) =>
+                                Number(b.createdAt || b.timeOut || b.timeIn || 0) - Number(a.createdAt || a.timeOut || a.timeIn || 0)
+                            );
+                            setData(p => ({ ...p, requests: sorted }));
+                        };
+                        const uInbox = db.collection('notifications')
+                            .where('adminInboxKey', '==', `${cleanAdminId}__unread`)
+                            .limit(60)
+                            .onSnapshot(s => {
+                                inboxMap.clear();
+                                s.docs.forEach(x => inboxMap.set(x.id, { id: x.id, ...x.data() }));
+                                publishMergedRequests();
+                            }, () => {});
+                        const uLegacy = db.collection('notifications')
+                            .where('adminId', '==', cleanAdminId)
+                            .limit(120)
+                            .onSnapshot(s => {
+                                legacyMap.clear();
+                                s.docs.forEach(x => legacyMap.set(x.id, { id: x.id, ...x.data() }));
+                                publishMergedRequests();
+                            }, () => {});
+                        return () => {
+                            try { uInbox && uInbox(); } catch (e) {}
+                            try { uLegacy && uLegacy(); } catch (e) {}
+                        };
+                    })(),
                     db.collection('market_requests').where('adminId', '==', adminId).limit(80).onSnapshot(s => setData(p => ({ ...p, marketRequests: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
                     db.collection('job_ads').where('adminId', '==', adminId).limit(60).onSnapshot(s => setData(p => ({ ...p, jobAds: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
                     db.collection('store_orders').where('adminId', '==', adminId).limit(100).onSnapshot(s => setData(p => ({ ...p, storeOrders: s.docs.map(x => ({ id: x.id, ...x.data() })) }))),
@@ -5668,14 +5788,101 @@
             const jobApplicants = data.marketRequests.filter(r => r.fromAd === true && r.status === 'accepted' && !r.read);
             const leftSiteAlerts = data.requests.filter(r => r.type === 'left_site');
             const unreadCount = data.requests.length + jobApplicants.length;
-            const latestLeftAlert = leftSiteAlerts[0];
-            const notifBody = latestLeftAlert
-                ? (lang === 'ar'
-                    ? `⚠️ تنبيه: العامل ${latestLeftAlert.workerName} غادر موقع العمل (${latestLeftAlert.inDist || ''} متر)`
-                    : `⚠️ Alert: Worker ${latestLeftAlert.workerName} left the work site (${latestLeftAlert.inDist || ''}m)`)
-                : (lang === 'ar' ? 'لديك إشعارات وطلبات حضور جديدة من العمال' : 'You have new worker notifications');
+            const [nativeNotifEnabled, setNativeNotifEnabled] = useState(() => {
+                try {
+                    if (window.AndroidApp && typeof window.AndroidApp.hasNotificationPermission === 'function') {
+                        return Boolean(window.AndroidApp.hasNotificationPermission());
+                    }
+                } catch (e) {}
+                return true;
+            });
 
-            useAppNotifications(unreadCount, 'نظام أستاذ وعد | الأسطة', notifBody);
+            useEffect(() => {
+                const checkPerm = () => {
+                    try {
+                        if (window.AndroidApp && typeof window.AndroidApp.hasNotificationPermission === 'function') {
+                            setNativeNotifEnabled(Boolean(window.AndroidApp.hasNotificationPermission()));
+                        }
+                    } catch (e) {}
+                };
+                window.addEventListener('focus', checkPerm);
+                document.addEventListener('visibilitychange', checkPerm);
+                return () => {
+                    window.removeEventListener('focus', checkPerm);
+                    document.removeEventListener('visibilitychange', checkPerm);
+                };
+            }, []);
+
+            // Per-ID real-time notification engine (fires specific worker alert even when total unread count doesn't increase)
+            const seenAdminNotifIdsRef = useRef(new Set());
+            const notifInitializedRef = useRef(false);
+            useEffect(() => {
+                if ("Notification" in window && Notification.permission === "default") {
+                    try { Notification.requestPermission(); } catch (e) {}
+                }
+                if (navigator.setAppBadge) {
+                    if (unreadCount > 0) navigator.setAppBadge(unreadCount).catch(() => {});
+                    else navigator.clearAppBadge().catch(() => {});
+                }
+
+                const currentItems = [
+                    ...(data.requests || []).map(r => ({ key: `ntf_${r.id}`, kind: 'notif', item: r })),
+                    ...(jobApplicants || []).map(a => ({ key: `app_${a.id}`, kind: 'applicant', item: a }))
+                ];
+
+                if (!notifInitializedRef.current) {
+                    // On initial load, seed existing IDs and alert only for very fresh (<5 min) unread items not yet shown in this session
+                    const freshCutoff = Date.now() - (5 * 60 * 1000);
+                    const freshUnseen = [];
+                    currentItems.forEach(entry => {
+                        seenAdminNotifIdsRef.current.add(entry.key);
+                        const ts = Number(entry.item?.createdAt || entry.item?.timeOut || entry.item?.timeIn || entry.item?.timestamp || 0);
+                        const sessKey = `alosta_alerted_${entry.key}`;
+                        if (ts >= freshCutoff && !sessionStorage.getItem(sessKey)) {
+                            freshUnseen.push(entry);
+                            try { sessionStorage.setItem(sessKey, '1'); } catch (e) {}
+                        }
+                    });
+                    if (currentItems.length > 0 || !isInitialSyncing) {
+                        notifInitializedRef.current = true;
+                    }
+                    freshUnseen.slice(0, 2).forEach(entry => {
+                        if (entry.kind === 'notif') {
+                            const fmt = formatContractorNotifAlert(entry.item, lang);
+                            triggerNativeNotification(fmt.title, fmt.body);
+                        } else {
+                            triggerNativeNotification(
+                                lang === 'ar' ? '💼 متقدم جديد على إعلان العمل' : '💼 New Job Applicant',
+                                lang === 'ar' ? `العامل ${entry.item.workerName || ''} قدّم على إعلانك` : `${entry.item.workerName || ''} applied for your job`
+                            );
+                        }
+                    });
+                    return;
+                }
+
+                const newlyArrived = currentItems.filter(entry => !seenAdminNotifIdsRef.current.has(entry.key));
+                if (newlyArrived.length === 0) return;
+
+                newlyArrived.forEach(entry => {
+                    seenAdminNotifIdsRef.current.add(entry.key);
+                    try { sessionStorage.setItem(`alosta_alerted_${entry.key}`, '1'); } catch (e) {}
+                });
+
+                newlyArrived.slice(0, 3).forEach(entry => {
+                    if (entry.kind === 'notif') {
+                        const fmt = formatContractorNotifAlert(entry.item, lang);
+                        triggerNativeNotification(fmt.title, fmt.body);
+                        addToast(`${fmt.title}: ${fmt.body}`);
+                    } else {
+                        const t = lang === 'ar' ? '💼 متقدم جديد على إعلان العمل' : '💼 New Job Applicant';
+                        const b = lang === 'ar'
+                            ? `العامل ${entry.item.workerName || ''} قدّم طلباً على إعلانك`
+                            : `${entry.item.workerName || ''} applied to your job`;
+                        triggerNativeNotification(t, b);
+                        addToast(`${t}: ${b}`);
+                    }
+                });
+            }, [data.requests, jobApplicants.length, unreadCount, isInitialSyncing, lang]);
 
             // Deterministic single-project ownership for attendance records so wages never leak to a newly created project
             const resolveAttendanceOwnerProjectId = (att, projectsList = data.projects) => {
@@ -6335,7 +6542,7 @@
                         paidByWorkerName: r.workerName || '',
                         settled: false
                     });
-                    await db.collection('notifications').doc(r.id).update({ status: 'approved' });
+                    await db.collection('notifications').doc(r.id).update({ status: 'approved', adminInboxKey: '' });
                     addToast(
                         lang === 'ar'
                             ? `تم اعتماد فاتورة المواد وإضافة (${fmtMoney(parsedCost, lang)}) إلى حساب العامل "${r.workerName}" ومصاريف المشروع ✓`
@@ -6489,11 +6696,16 @@
                 attendanceBusyRef.current[lockKey] = true;
                 try {
                     const batch = db.batch();
-                    batch.update(db.collection('notifications').doc(r.id), { status: 'approved' });
-                    // Also mark any duplicate unread clock_in notifications for the same worker & date as approved
-                    const sameDayReqs = (data.requests || []).filter(x => x.id !== r.id && x.workerId === r.workerId && x.date === targetDate && x.type !== 'left_site');
+                    batch.update(db.collection('notifications').doc(r.id), { status: 'approved', adminInboxKey: '' });
+                    // Also mark any duplicate unread clock_in notifications for the same worker & date as approved (never touch material/clock_out alerts!)
+                    const sameDayReqs = (data.requests || []).filter(x =>
+                        x.id !== r.id &&
+                        x.workerId === r.workerId &&
+                        x.date === targetDate &&
+                        (!x.type || x.type === 'clock_in' || x.type === 'attendance')
+                    );
                     for (const extraReq of sameDayReqs) {
-                        batch.update(db.collection('notifications').doc(extraReq.id), { status: 'approved' });
+                        batch.update(db.collection('notifications').doc(extraReq.id), { status: 'approved', adminInboxKey: '' });
                     }
 
                     // Check in-memory attendance snapshot (zero redundant .get() N+1 call)
@@ -6795,7 +7007,7 @@
                                                 </a>
                                             )}
                                             <button
-                                                onClick={() => db.collection('notifications').doc(alert.id).update({ status: 'read' })}
+                                                onClick={() => db.collection('notifications').doc(alert.id).update({ status: 'read', adminInboxKey: '' })}
                                                 className="px-2.5 py-1.5 bg-white text-rose-600 rounded-xl font-black text-[10px] active:scale-95 shadow-xs"
                                             >
                                                 {tr('markRead')}
@@ -6803,6 +7015,32 @@
                                         </div>
                                     </div>
                                 ))}
+                            </div>
+                        )}
+
+                        {!nativeNotifEnabled && (
+                            <div className="no-print bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-700 p-3 rounded-2xl flex items-center justify-between gap-2.5 shadow-xs">
+                                <div className="min-w-0">
+                                    <p className="font-black text-xs text-amber-900 dark:text-amber-200">
+                                        🔔 إشعارات الهاتف متوقفة لتطبيق الأسطة
+                                    </p>
+                                    <p className="text-[10px] font-bold text-amber-700 dark:text-amber-300 mt-0.5">
+                                        فعّل الإذن ليصلك تنبيه فوري عند حضور أو انصراف أو طلبات العمال
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        try {
+                                            if (window.AndroidApp && typeof window.AndroidApp.openNotificationSettings === 'function') {
+                                                window.AndroidApp.openNotificationSettings();
+                                            }
+                                        } catch (e) {}
+                                    }}
+                                    className="shrink-0 px-3 py-2 bg-amber-500 text-slate-950 rounded-xl font-black text-[11px] active:scale-95 shadow-sm"
+                                >
+                                    تفعيل الآن
+                                </button>
                             </div>
                         )}
 
@@ -9501,7 +9739,7 @@
                                             </a>
                                         )}
                                         <button
-                                            onClick={() => db.collection('notifications').doc(r.id).update({ status: 'read' })}
+                                            onClick={() => db.collection('notifications').doc(r.id).update({ status: 'read', adminInboxKey: '' })}
                                             className="px-3 py-2 bg-rose-600 text-white rounded-xl text-xs font-bold active:scale-95 shadow-xs"
                                         >
                                             {tr('markRead')}
@@ -9533,12 +9771,32 @@
                                             <span>{lang === 'ar' ? 'اعتماد وإضافة لحسابه' : 'Approve & Credit'}</span>
                                         </button>
                                         <button
-                                            onClick={() => db.collection('notifications').doc(r.id).update({ status: 'rejected' })}
+                                            onClick={() => db.collection('notifications').doc(r.id).update({ status: 'rejected', adminInboxKey: '' })}
                                             className="p-2.5 bg-rose-500 text-white rounded-xl shadow-sm active:scale-95"
                                         >
                                             <Icon name="x" size={15} />
                                         </button>
                                     </div>
+                                </div>
+                            ) : (r.type === 'clock_out' || r.type === 'clock_in_verified' || r.type === 'invite_accepted' || r.type === 'job_apply') ? (
+                                <div key={r.id} className="bg-emerald-50/80 dark:bg-emerald-950/35 p-3.5 rounded-2xl flex justify-between items-center border border-emerald-200 dark:border-emerald-800 gap-2">
+                                    <div className="min-w-0 flex-1">
+                                        <p className="font-black text-sm text-emerald-800 dark:text-emerald-200">
+                                            {formatContractorNotifAlert(r, lang).title}
+                                        </p>
+                                        <p className="text-xs font-bold text-slate-700 dark:text-slate-200 mt-0.5">
+                                            {formatContractorNotifAlert(r, lang).body}
+                                        </p>
+                                        <p className="text-[10px] text-slate-400 font-bold mt-0.5">
+                                            {formatTime(r.createdAt || r.timeOut || r.timeIn, lang)}
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => db.collection('notifications').doc(r.id).update({ status: 'read', adminInboxKey: '' })}
+                                        className="shrink-0 px-3 py-2 bg-emerald-600 text-white rounded-xl text-xs font-black active:scale-95 shadow-xs"
+                                    >
+                                        {tr('markRead')}
+                                    </button>
                                 </div>
                             ) : (
                                 <div key={r.id} className="bg-slate-50 dark:bg-slate-900 p-3.5 rounded-2xl flex justify-between items-center border dark:border-slate-700">
@@ -9574,7 +9832,7 @@
                                             </a>
                                         )}
                                         <button onClick={() => approveRequest(r)} className="p-2.5 bg-emerald-500 text-white rounded-xl shadow-sm active:scale-95"><Icon name="check" /></button>
-                                        <button onClick={() => db.collection('notifications').doc(r.id).update({ status: 'rejected' })} className="p-2.5 bg-rose-500 text-white rounded-xl shadow-sm active:scale-95"><Icon name="x" /></button>
+                                        <button onClick={() => db.collection('notifications').doc(r.id).update({ status: 'rejected', adminInboxKey: '' })} className="p-2.5 bg-rose-500 text-white rounded-xl shadow-sm active:scale-95"><Icon name="x" /></button>
                                     </div>
                                 </div>
                             ))}
@@ -11912,7 +12170,7 @@
                     }),
                     db.collection('notifications').where('workerId', '==', worker.id).limit(100).onSnapshot(s => {
                         const allNotifs = s.docs.map(x => ({ id: x.id, ...x.data() }));
-                        setPendingReq(allNotifs.find(x => x.date === todayStr() && x.status === 'unread' && x.type !== 'left_site' && x.type !== 'worker_material') || null);
+                        setPendingReq(allNotifs.find(x => x.date === todayStr() && x.status === 'unread' && (!x.type || x.type === 'clock_in' || x.type === 'attendance')) || null);
                         setD(p => ({ ...p, pendingMats: allNotifs.filter(x => x.type === 'worker_material' && x.status === 'unread') }));
                     }),
                     db.collection('market_requests').where('workerId', '==', worker.id).where('status', 'in', ['pending', 'invited']).limit(100).onSnapshot(s => setMarketRequests(s.docs.map(x => ({ id: x.id, ...x.data() })))),
@@ -11995,11 +12253,11 @@
                         addToast(warnBody);
 
                         try {
-                            await db.collection('notifications').add({
+                            await sendContractorNotification(db, {
                                 date: todayStr(),
                                 workerId: lW.id,
                                 workerName: lW.name,
-                                adminId: activeProject?.adminId || lW.adminId,
+                                adminId: activeProject?.adminId || lW.adminId || worker?.adminId || '',
                                 projectId: activeProject?.id || null,
                                 projectTitle: activeProject?.title || '',
                                 timeIn: tA.timeIn,
@@ -12008,7 +12266,6 @@
                                 outLoc: coords,
                                 inStatus: 'invalid',
                                 inDist: rawDist,
-                                status: 'unread',
                                 type: 'left_site'
                             });
                             await db.collection('attendance').doc(tA.id).update({
@@ -12421,6 +12678,21 @@
                             effortScore: eff.effortScore,
                             stepEngineV2: true
                         });
+                        if (!existingTodayAtt.inLoc || existingTodayAtt.status === 'absent') {
+                            await sendContractorNotification(db, {
+                                date: today,
+                                workerId: lW.id,
+                                workerName: lW.name,
+                                adminId: targetProj?.adminId || lW.adminId || worker?.adminId || '',
+                                projectId: targetProj?.id || existingTodayAtt.projectId || null,
+                                projectTitle: targetProj?.title || '',
+                                timeIn: existingTodayAtt.timeIn || Date.now(),
+                                inLoc: coords,
+                                inStatus: 'valid',
+                                inDist: distance,
+                                type: 'clock_in_verified'
+                            }).catch(() => {});
+                        }
                         addToast(lang === 'ar'
                             ? `✓ تم توثيق موقعك (${distance}م) وتأكيد حضور اليوم المسجل لدى المقاول بدون تكرار الأجر`
                             : `✓ Location verified (${distance}m) & merged with today's attendance`);
@@ -12428,13 +12700,17 @@
                     }
 
                     if (pendingReq && pendingReq.id) {
+                        const pendingAdminId = String(targetProj?.adminId || lW.adminId || worker?.adminId || pendingReq.adminId || '').trim();
                         await db.collection('notifications').doc(pendingReq.id).update({
+                            adminId: pendingAdminId,
+                            adminInboxKey: pendingAdminId ? `${pendingAdminId}__unread` : '',
                             inLoc: coords,
                             inStatus: 'valid',
                             inDist: distance,
                             steps: eff.steps,
                             effortScore: eff.effortScore,
                             stepEngineV2: true,
+                            createdAt: Date.now(),
                             timeIn: pendingReq.timeIn || Date.now()
                         });
                         addToast(lang === 'ar'
@@ -12443,11 +12719,16 @@
                         return;
                     }
 
-                    await db.collection('notifications').add({
+                    const targetAdminId = String(targetProj?.adminId || lW.adminId || worker?.adminId || '').trim();
+                    if (!targetAdminId) {
+                        addToast(lang === 'ar' ? '⚠️ لم يتم العثور على معرّف المقاول المرتبط بحسابك' : '⚠️ Missing linked contractor ID');
+                        return;
+                    }
+                    await sendContractorNotification(db, {
                         date: today,
                         workerId: lW.id,
                         workerName: lW.name,
-                        adminId: targetProj?.adminId || lW.adminId,
+                        adminId: targetAdminId,
                         projectId: targetProj?.id || null,
                         projectTitle: targetProj?.title || '',
                         timeIn: Date.now(),
@@ -12457,7 +12738,6 @@
                         steps: 0,
                         effortScore: 0,
                         stepEngineV2: true,
-                        status: 'unread',
                         type: 'clock_in'
                     });
 
@@ -12531,23 +12811,22 @@
                             workers: { [lW.id]: checkoutTelemetry }
                         }, { merge: true }).catch(() => {});
                     }
-                    if (status === 'invalid' && activeProject) {
-                        await db.collection('notifications').add({
+                    if (checkoutAdminId) {
+                        await sendContractorNotification(db, {
                             date: todayStr(),
                             workerId: lW.id,
                             workerName: lW.name,
-                            adminId: activeProject.adminId || lW.adminId,
-                            projectId: activeProject.id,
-                            projectTitle: activeProject.title || '',
+                            adminId: checkoutAdminId,
+                            projectId: activeProject?.id || null,
+                            projectTitle: activeProject?.title || '',
                             timeIn: tA.timeIn,
                             timeOut: Date.now(),
                             inLoc: coords,
                             outLoc: coords,
-                            inStatus: 'invalid',
-                            inDist: distance ? Math.round(distance) : null,
-                            status: 'unread',
-                            type: 'left_site'
-                        });
+                            inStatus: status,
+                            inDist: distance !== null && isFinite(distance) ? Math.round(distance) : null,
+                            type: (status === 'invalid' && activeProject) ? 'left_site' : 'clock_out'
+                        }).catch(() => {});
                     }
                     setLeftSiteWarning(null);
                     addToast(lang === 'ar' ? 'تم تسجيل الانصراف بنجاح ✓' : 'Clocked Out ✓');
@@ -12577,6 +12856,16 @@
                         wage: initialContractorWage
                     });
                     await batch.commit();
+                    if (req.adminId) {
+                        await sendContractorNotification(db, {
+                            date: todayStr(),
+                            workerId: lW.id,
+                            workerName: lW.name,
+                            adminId: req.adminId,
+                            projectTitle: req.projectTitle || '',
+                            type: 'invite_accepted'
+                        }).catch(() => {});
+                    }
                     addToast(lang === 'ar' ? 'تم الانضمام لكادر المقاول ✓' : 'Joined Staff ✓');
                 } catch (e) { addToast('Error'); }
             };
@@ -12592,6 +12881,16 @@
                         timestamp: Date.now(),
                         fromAd: true
                     });
+                    if (ad.adminId) {
+                        await sendContractorNotification(db, {
+                            date: todayStr(),
+                            workerId: lW.id,
+                            workerName: lW.name,
+                            adminId: ad.adminId,
+                            projectTitle: ad.title || ad.specialty || '',
+                            type: 'job_apply'
+                        }).catch(() => {});
+                    }
                     addToast(lang === 'ar' ? 'تم إرسال طلب التقديم للمقاول ✓' : 'Applied ✓');
                 } catch (e) { }
             };
@@ -13061,18 +13360,22 @@
                                 return;
                             }
                             const targetProj = allProjects.find(p => p.id === f.projId?.value) || activeProject || allProjects[0] || null;
+                            const targetMatAdminId = String(targetProj?.adminId || lW.adminId || worker?.adminId || '').trim();
+                            if (!targetMatAdminId) {
+                                addToast(lang === 'ar' ? '⚠️ لم يتم العثور على معرّف المقاول المرتبط بحسابك' : '⚠️ Missing linked contractor ID');
+                                return;
+                            }
                             try {
-                                await db.collection('notifications').add({
+                                await sendContractorNotification(db, {
                                     date: todayStr(),
                                     workerId: lW.id,
                                     workerName: lW.name,
-                                    adminId: targetProj?.adminId || lW.adminId,
+                                    adminId: targetMatAdminId,
                                     projectId: targetProj?.id || null,
                                     projectTitle: targetProj?.title || '',
                                     item: itemText,
                                     cost: parsedCost,
                                     timeIn: Date.now(),
-                                    status: 'unread',
                                     type: 'worker_material'
                                 });
                                 setWorkerMatModal(false);

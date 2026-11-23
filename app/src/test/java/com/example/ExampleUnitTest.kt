@@ -126,8 +126,24 @@ class ExampleUnitTest {
         assertTrue(AlOstaBackgroundNotifier.audienceMatchesRole("workers", "worker"))
         assertFalse(AlOstaBackgroundNotifier.audienceMatchesRole("workers", "contractor"))
 
-        val (leftTitle, leftBody) = AlOstaBackgroundNotifier.formatPersonalAlert("left_site", "أحمد", "بناية المنصور", "")
+        val (leftTitle, leftBody) = AlOstaBackgroundNotifier.formatPersonalAlert("left_site", "أحمد", "بناية المنصور", "", distText = "240")
         assertTrue(leftTitle.contains("مغادرة"))
-        assertTrue(leftBody.contains("أحمد") && leftBody.contains("بناية المنصور"))
+        assertTrue(leftBody.contains("أحمد") && leftBody.contains("بناية المنصور") && leftBody.contains("240"))
+
+        val (matTitle, matBody) = AlOstaBackgroundNotifier.formatPersonalAlert("worker_material", "علي", "فيلا الكرادة", "", itemName = "صبغ جوتن", costText = "85,000")
+        assertTrue(matTitle.contains("مواد"))
+        assertTrue(matBody.contains("علي") && matBody.contains("صبغ جوتن") && matBody.contains("85,000"))
+
+        val (outTitle, outBody) = AlOstaBackgroundNotifier.formatPersonalAlert("clock_out", "حسين", "برج الزوراء", "")
+        assertTrue(outTitle.contains("انصراف"))
+        assertTrue(outBody.contains("حسين") && outBody.contains("برج الزوراء"))
+
+        val (invTitle, invBody) = AlOstaBackgroundNotifier.formatPersonalAlert("invite_accepted", "كريم", "", "")
+        assertTrue(invTitle.contains("انضمام"))
+        assertTrue(invBody.contains("كريم"))
+
+        val (jobTitle, jobBody) = AlOstaBackgroundNotifier.formatPersonalAlert("job_apply", "سجاد", "", "")
+        assertTrue(jobTitle.contains("متقدم"))
+        assertTrue(jobBody.contains("سجاد"))
     }
 }

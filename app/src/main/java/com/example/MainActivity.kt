@@ -178,6 +178,9 @@ open class MainActivity : ComponentActivity() {
         super.onPause()
         AlOstaLocationManager.pauseIfIdle(this)
         WorkerStepTracker.flushPendingDiskWrite(this)
+        if (!isDashboardMode && !packageName.contains("dashboard", ignoreCase = true)) {
+            AlOstaBackgroundNotifier.scheduleQuickRecheck(this)
+        }
     }
 
     override fun onDestroy() {
@@ -467,26 +470,87 @@ class AndroidAppBridge(
                     ) == PackageManager.PERMISSION_GRANTED
                     if (!granted) return@post
                 }
-                val launchIntent = Intent(context, MainActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val mgr = context.getSystemService(NotificationManager::class.java)
+                    if (mgr?.getNotificationChannel(NOTIFICATION_CHANNEL_ID) == null) {
+                        val channel = NotificationChannel(
+                            NOTIFICATION_CHANNEL_ID,
+                            context.getString(R.string.notification_channel_name),
+                            NotificationManager.IMPORTANCE_HIGH
+                        ).apply {
+                            description = context.getString(R.string.notification_channel_desc)
+                            enableVibration(true)
+                        }
+                        mgr?.createNotificationChannel(channel)
+                    }
                 }
+                val launchIntent = Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+                val notifId = notificationIdCounter.getAndIncrement()
                 val pendingIntent = PendingIntent.getActivity(
                     context,
-                    0,
+                    notifId % 9000,
                     launchIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
+                val safeTitle = title ?: context.getString(R.string.app_name)
+                val safeBody = body ?: ""
                 val notification = NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
                     .setSmallIcon(R.mipmap.ic_launcher)
-                    .setContentTitle(title ?: context.getString(R.string.app_name))
-                    .setContentText(body ?: "")
+                    .setContentTitle(safeTitle)
+                    .setContentText(safeBody)
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(safeBody))
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setDefaults(NotificationCompat.DEFAULT_ALL)
                     .setAutoCancel(true)
                     .setContentIntent(pendingIntent)
                     .build()
 
                 val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                manager?.notify(notificationIdCounter.getAndIncrement(), notification)
+                manager?.notify(notifId, notification)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun hasNotificationPermission(): Boolean {
+        return try {
+            val mgr = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            val enabledInSystem = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                mgr?.areNotificationsEnabled() != false
+            } else true
+            if (!enabledInSystem) return false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+            } else {
+                true
+            }
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    @JavascriptInterface
+    fun openNotificationSettings() {
+        mainHandler.post {
+            try {
+                val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                        putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                } else {
+                    Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", context.packageName, null)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                }
+                context.startActivity(intent)
             } catch (_: Exception) {
             }
         }
