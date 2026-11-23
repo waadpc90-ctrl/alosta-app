@@ -100,6 +100,9 @@ class ExampleRobolectricTest {
         assertEquals(0, json.getInt("steps"))
         assertEquals(0, json.getInt("effortScore"))
         assertEquals(0, json.getInt("effortStars"))
+        val notifSummary = WorkerStepTracker.getLiveNotificationSummary(context, "worker_sec_test_1")
+        assertFalse("Worker notification must not expose steps", notifSummary.contains("خطوة"))
+        assertFalse("Worker notification must not expose active minutes", notifSummary.contains("د نشطة"))
     }
 
     @Test

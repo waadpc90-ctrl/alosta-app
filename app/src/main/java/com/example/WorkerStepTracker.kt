@@ -20,6 +20,11 @@ import kotlin.math.sqrt
 object WorkerStepTracker : SensorEventListener {
     private const val PREF_FILE = "al_osta_step_prefs_v2"
     private const val IDLE_THRESHOLD_MS = 10 * 60 * 1000L
+    private const val ACTIVE_WORK_MIN_SECONDS_REQUIRED = 12
+    private const val ACTIVE_WORK_MIN_STEPS_REQUIRED = 10
+    private const val MAX_PLAUSIBLE_STEPS_PER_SEC = 3.6
+    private const val MAX_SINGLE_GAP_RECOVERY_STEPS = 2500
+
     private var isRegistered = false
     private var appContext: Context? = null
     private var hasStepCounterSensor = false
@@ -29,11 +34,14 @@ object WorkerStepTracker : SensorEventListener {
     @Volatile
     private var activeWorkerId: String = ""
     @Volatile
+    private var inSiteBounds: Boolean = true
+    @Volatile
     private var rebaselineNeeded = true
 
     // Timestamps to coordinate hardware sensors vs accelerometer fallback without double counting
     private var lastStepCounterEventMs = 0L
     private var lastHardwareStepMs = 0L
+    private var lastAccelTimestampMs = 0L
 
     // In-memory live cache to avoid hammering SharedPreferences flash storage on every sensor tick
     @Volatile
@@ -59,12 +67,17 @@ object WorkerStepTracker : SensorEventListener {
     private val recentStepBuckets = LinkedHashMap<Long, Int>()
     private val recentMotionBuckets = LinkedHashSet<Long>()
 
-    // Stationary trade work motion detector (detects sustained manual work without faking footsteps)
-    private var lastWorkMotionSampleMs = 0L
-    private var motionWindowStartMs = 0L
-    private var motionImpulseCount = 0
+    // Per-minute sustained manual work accumulator (prevents brief phone pickups from counting as a full active minute)
+    private var workMinuteEpoch = -1L
+    private var workMinuteCredited = false
+    private var workMinuteSteps = 0
+    private var workMinuteActiveSeconds = 0
+    private var currentSecondEpoch = -1L
+    private var currentSecondImpulses = 0
+    private var recentMotionWindowStartMs = 0L
+    private var recentMotionActiveSecCount = 0
 
-    // Anti-noise low-pass gravity & multi-step cadence state for accelerometer / detector
+    // Time-constant-normalized low-pass gravity & multi-step cadence state for accelerometer / detector
     private var gravityEstimate = 9.81f
     private var awaitingTrough = false
     private var lastPeakTimestampMs = 0L
@@ -91,6 +104,10 @@ object WorkerStepTracker : SensorEventListener {
         return "baseline_${workerDayId(today, workerId)}"
     }
 
+    private fun workerShiftActiveKey(today: String, workerId: String): String {
+        return "shift_active_${workerDayId(today, workerId)}"
+    }
+
     private fun workerActiveMinKey(today: String, workerId: String): String {
         return "active_min_${workerDayId(today, workerId)}"
     }
@@ -107,6 +124,30 @@ object WorkerStepTracker : SensorEventListener {
         return "last_motion_ms_${workerDayId(today, workerId)}"
     }
 
+    /**
+     * Pure biomechanical helper shared by native metrics and JVM unit tests.
+     * Uses MET-based active expenditure (walking + non-overlapping manual site work).
+     */
+    fun computeNativeEnergyKcal(steps: Int, activeMinutes: Int): Int {
+        val safeSteps = steps.coerceAtLeast(0)
+        val safeActiveMin = activeMinutes.coerceIn(0, 720)
+        val walkingMinEst = safeSteps / 95.0
+        val extraStationaryMin = (safeActiveMin - walkingMinEst).coerceAtLeast(0.0)
+        return (safeSteps * 0.044 + extraStationaryMin * 2.6).roundToInt().coerceAtLeast(0)
+    }
+
+    /**
+     * Pure physiological plausibility guard for hardware step counter deltas across background gaps.
+     */
+    fun isPlausibleStepDelta(deltaSteps: Int, elapsedMs: Long): Boolean {
+        if (deltaSteps <= 0 || deltaSteps > MAX_SINGLE_GAP_RECOVERY_STEPS) return false
+        if (elapsedMs <= 0L) return deltaSteps <= 40
+        val elapsedSec = (elapsedMs / 1000.0).coerceAtLeast(1.0)
+        // Allow short sensor batching jitter (+20 steps) plus realistic max fast walking cadence
+        val maxAllowed = (elapsedSec * MAX_PLAUSIBLE_STEPS_PER_SEC + 20.0).roundToInt()
+        return deltaSteps <= maxAllowed
+    }
+
     private fun ensureCacheLoaded(prefs: android.content.SharedPreferences, today: String, workerId: String) {
         val dayKey = workerDayId(today, workerId)
         val stepsKey = workerStepsKey(today, workerId)
@@ -121,6 +162,10 @@ object WorkerStepTracker : SensorEventListener {
             dirtyStepsPending = false
             recentStepBuckets.clear()
             recentMotionBuckets.clear()
+            workMinuteEpoch = cachedLastActiveBucket
+            workMinuteCredited = cachedLastActiveBucket >= 0L
+            workMinuteSteps = 0
+            workMinuteActiveSeconds = 0
         }
     }
 
@@ -162,22 +207,65 @@ object WorkerStepTracker : SensorEventListener {
         }
     }
 
-    private fun recordWorkMotion(
+    private fun advanceWorkMinuteState(minuteBucket: Long) {
+        if (workMinuteEpoch != minuteBucket) {
+            workMinuteEpoch = minuteBucket
+            workMinuteCredited = (minuteBucket == cachedLastActiveBucket)
+            workMinuteSteps = 0
+            workMinuteActiveSeconds = 0
+        }
+    }
+
+    private fun creditActiveMinuteIfQualified(
+        prefs: android.content.SharedPreferences,
+        today: String,
+        workerId: String,
+        minuteBucket: Long,
+        nowMs: Long
+    ) {
+        if (workMinuteCredited) return
+        val qualified = workMinuteSteps >= ACTIVE_WORK_MIN_STEPS_REQUIRED ||
+            workMinuteActiveSeconds >= ACTIVE_WORK_MIN_SECONDS_REQUIRED
+        if (!qualified) return
+
+        workMinuteCredited = true
+        if (minuteBucket != cachedLastActiveBucket) {
+            cachedLastActiveBucket = minuteBucket
+            cachedActiveMinutes = (cachedActiveMinutes + 1).coerceAtMost(720)
+        }
+        recentMotionBuckets.add(minuteBucket)
+        cachedLastMotionAtMs = nowMs
+        flushToPrefsIfDue(prefs, today, workerId, nowMs, forceFlush = false)
+    }
+
+    private fun recordSustainedWorkSecond(
         prefs: android.content.SharedPreferences,
         today: String,
         workerId: String,
         nowMs: Long
     ) {
         ensureCacheLoaded(prefs, today, workerId)
-        cachedLastMotionAtMs = nowMs
         val minuteBucket = nowMs / 60_000L
         pruneRollingBuckets(minuteBucket)
-        recentMotionBuckets.add(minuteBucket)
-        if (minuteBucket != cachedLastActiveBucket) {
-            cachedLastActiveBucket = minuteBucket
-            cachedActiveMinutes = (cachedActiveMinutes + 1).coerceAtMost(960)
+        advanceWorkMinuteState(minuteBucket)
+        workMinuteActiveSeconds++
+
+        // Update live motion timestamp once >= 4 distinct active work seconds occur inside a 10s window
+        if (recentMotionWindowStartMs == 0L || (nowMs - recentMotionWindowStartMs) > 10_000L) {
+            recentMotionWindowStartMs = nowMs
+            recentMotionActiveSecCount = 1
+        } else {
+            recentMotionActiveSecCount++
+            if (recentMotionActiveSecCount >= 4) {
+                cachedLastMotionAtMs = nowMs
+                recentMotionBuckets.add(minuteBucket)
+                recentMotionWindowStartMs = nowMs
+                recentMotionActiveSecCount = 0
+                flushToPrefsIfDue(prefs, today, workerId, nowMs, forceFlush = false)
+            }
         }
-        flushToPrefsIfDue(prefs, today, workerId, nowMs, forceFlush = false)
+
+        creditActiveMinuteIfQualified(prefs, today, workerId, minuteBucket, nowMs)
     }
 
     private fun recordConfirmedSteps(
@@ -196,7 +284,22 @@ object WorkerStepTracker : SensorEventListener {
             val minuteBucket = nowMs / 60_000L
             pruneRollingBuckets(minuteBucket)
             recentStepBuckets[minuteBucket] = (recentStepBuckets[minuteBucket] ?: 0) + deltaSteps
-            recordWorkMotion(prefs, today, workerId, nowMs)
+            advanceWorkMinuteState(minuteBucket)
+            workMinuteSteps += deltaSteps
+            if (deltaSteps >= 2) {
+                cachedLastMotionAtMs = nowMs
+                recentMotionBuckets.add(minuteBucket)
+            }
+            // If a large batch of steps arrived after background recovery, credit proportional walking minutes fairly
+            if (deltaSteps >= 95 && !workMinuteCredited) {
+                val recoveredWalkMin = (deltaSteps / 95).coerceIn(1, 25)
+                cachedActiveMinutes = (cachedActiveMinutes + recoveredWalkMin).coerceAtMost(720)
+                cachedLastActiveBucket = minuteBucket
+                workMinuteCredited = true
+            } else {
+                creditActiveMinuteIfQualified(prefs, today, workerId, minuteBucket, nowMs)
+            }
+            flushToPrefsIfDue(prefs, today, workerId, nowMs, forceFlush = false)
         } else {
             flushToPrefsIfDue(prefs, today, workerId, nowMs, forceFlush = false)
         }
@@ -225,12 +328,14 @@ object WorkerStepTracker : SensorEventListener {
         lastPeakTimestampMs = 0L
         lastAccelStepTimestampMs = 0L
         lastDetectorStepTimestampMs = 0L
+        lastAccelTimestampMs = 0L
         consecutiveDetectorSteps = 0
         consecutiveRhythmicSteps = 0
         isWalkingConfirmed = false
-        lastWorkMotionSampleMs = 0L
-        motionWindowStartMs = 0L
-        motionImpulseCount = 0
+        currentSecondEpoch = -1L
+        currentSecondImpulses = 0
+        recentMotionWindowStartMs = 0L
+        recentMotionActiveSecCount = 0
     }
 
     fun hasActivityRecognitionPermission(ctx: Context): Boolean {
@@ -238,6 +343,18 @@ object WorkerStepTracker : SensorEventListener {
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED
         } else {
             true
+        }
+    }
+
+    @Synchronized
+    fun setInSiteBounds(inBounds: Boolean) {
+        if (inSiteBounds != inBounds) {
+            inSiteBounds = inBounds
+            // When returning inside the site geofence after being off-site, rebase step counter so off-site walking isn't added
+            if (inBounds) {
+                rebaselineNeeded = true
+                resetCadenceFilter()
+            }
         }
     }
 
@@ -252,11 +369,18 @@ object WorkerStepTracker : SensorEventListener {
     fun setTrackingState(context: Context, enabled: Boolean, workerId: String) {
         val ctx = context.applicationContext
         appContext = ctx
+        val prefs = ctx.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+        val today = todayKey()
         val cleanId = workerId.trim()
         if (!enabled || cleanId.isEmpty()) {
+            val prevId = activeWorkerId
+            if (prevId.isNotEmpty()) {
+                prefs.edit().putBoolean(workerShiftActiveKey(today, prevId), false).apply()
+            }
             if (trackingEnabled || isRegistered || WorkerShiftMonitorService.isRunning) {
                 trackingEnabled = false
                 activeWorkerId = ""
+                inSiteBounds = true
                 rebaselineNeeded = true
                 resetCadenceFilter()
                 stop(ctx)
@@ -264,11 +388,15 @@ object WorkerStepTracker : SensorEventListener {
             }
             return
         }
-        // Only reset baseline/cadence if tracking was off or switched to a different worker
+
+        // Preserve existing hardware baseline when the app process restarts mid-shift on the same day
+        val wasShiftPersistedActive = prefs.getBoolean(workerShiftActiveKey(today, cleanId), false)
+        val hasExistingBaseline = prefs.getFloat(workerBaselineKey(today, cleanId), -1f) >= 0f
         if (!trackingEnabled || activeWorkerId != cleanId) {
-            rebaselineNeeded = true
+            rebaselineNeeded = !(wasShiftPersistedActive && hasExistingBaseline)
             resetCadenceFilter()
         }
+        prefs.edit().putBoolean(workerShiftActiveKey(today, cleanId), true).apply()
         activeWorkerId = cleanId
         trackingEnabled = true
         if (!isRegistered) {
@@ -285,7 +413,6 @@ object WorkerStepTracker : SensorEventListener {
         appContext = ctx
         if (trackingEnabled && activeWorkerId.isNotEmpty()) {
             stop(ctx)
-            rebaselineNeeded = true
             start(ctx)
         }
     }
@@ -309,18 +436,19 @@ object WorkerStepTracker : SensorEventListener {
         hasStepDetectorSensor = false
 
         try {
+            // Strict single-source pedometer hierarchy prevents StepCounter vs StepDetector double-counting races
             if (stepCounter != null) {
                 val ok = sensorManager.registerListener(this, stepCounter, SensorManager.SENSOR_DELAY_UI, 0)
                 hasStepCounterSensor = ok
                 anyRegistered = anyRegistered || ok
             }
-            if (stepDetector != null) {
-                val ok = sensorManager.registerListener(this, stepDetector, SensorManager.SENSOR_DELAY_FASTEST, 0)
+            if (!hasStepCounterSensor && stepDetector != null) {
+                val ok = sensorManager.registerListener(this, stepDetector, SensorManager.SENSOR_DELAY_UI, 0)
                 hasStepDetectorSensor = ok
                 anyRegistered = anyRegistered || ok
             }
-            // Register accelerometer at battery-friendly UI rate when hardware step sensor exists
-            // (used for stationary craft work detection), or GAME rate when acting as walking fallback
+            // Register accelerometer at battery-friendly UI rate for stationary craft work detection,
+            // or GAME rate only when no hardware step sensor exists
             if (accelerometer != null) {
                 val accelDelay = if (hasStepCounterSensor || hasStepDetectorSensor) {
                     SensorManager.SENSOR_DELAY_UI
@@ -360,10 +488,24 @@ object WorkerStepTracker : SensorEventListener {
         val baseKey = workerBaselineKey(today, workerId)
         val now = System.currentTimeMillis()
 
+        // Pause step & work-motion accumulation when confirmed outside the project site geofence
+        if (!inSiteBounds) {
+            if (event.sensor.type == Sensor.TYPE_STEP_COUNTER) {
+                val totalSinceBoot = event.values.firstOrNull() ?: return
+                if (totalSinceBoot >= 0f) {
+                    val existingDaily = readLiveSteps(prefs, today, workerId)
+                    prefs.edit().putFloat(baseKey, (totalSinceBoot - existingDaily).coerceAtLeast(0f)).apply()
+                    rebaselineNeeded = false
+                }
+            }
+            return
+        }
+
         when (event.sensor.type) {
             Sensor.TYPE_STEP_COUNTER -> {
                 val totalSinceBoot = event.values.firstOrNull() ?: return
-                if (totalSinceBoot <= 0f) return
+                if (totalSinceBoot < 0f) return
+                val prevCounterMs = lastStepCounterEventMs
                 lastStepCounterEventMs = now
                 lastHardwareStepMs = now
                 val existingDaily = readLiveSteps(prefs, today, workerId)
@@ -375,20 +517,25 @@ object WorkerStepTracker : SensorEventListener {
                 } else {
                     val computedDaily = (totalSinceBoot - savedBaseline).roundToInt().coerceAtLeast(0)
                     val delta = computedDaily - existingDaily
-                    if (delta in 1..2500) {
+                    val elapsedMs = when {
+                        prevCounterMs > 0L -> (now - prevCounterMs).coerceAtLeast(1000L)
+                        cachedLastStepAtMs > 0L -> (now - cachedLastStepAtMs).coerceAtLeast(1000L)
+                        else -> 60_000L
+                    }
+                    if (isPlausibleStepDelta(delta, elapsedMs)) {
                         recordConfirmedSteps(prefs, today, workerId, computedDaily, delta, now)
-                    } else if (delta > 2500) {
-                        // Guard against multi-hour off-shift jump: rebase to current existingDaily
+                    } else if (delta > 0) {
+                        // Guard against implausible off-shift/reboot/vehicle jump: rebase smoothly to existingDaily
                         prefs.edit().putFloat(baseKey, (totalSinceBoot - existingDaily).coerceAtLeast(0f)).apply()
                     }
                 }
             }
             Sensor.TYPE_STEP_DETECTOR -> {
-                // Avoid double-counting if TYPE_STEP_COUNTER is actively delivering updates within the last 3.5 seconds
-                if (hasStepCounterSensor && (now - lastStepCounterEventMs) < 3500L) return
+                // Only active when TYPE_STEP_COUNTER is unavailable
+                if (hasStepCounterSensor) return
                 val interval = now - lastDetectorStepTimestampMs
-                if (interval in 1..240L) return
-                if (interval > 2400L) {
+                if (interval in 1..260L) return
+                if (interval > 2200L) {
                     consecutiveDetectorSteps = 1
                 } else {
                     consecutiveDetectorSteps++
@@ -407,74 +554,76 @@ object WorkerStepTracker : SensorEventListener {
                 val y = event.values[1]
                 val z = event.values[2]
                 val mag = sqrt(x * x + y * y + z * z)
-                // Low-pass filter to isolate gravity component
-                gravityEstimate = 0.88f * gravityEstimate + 0.12f * mag
-                val dynamicAccel = mag - gravityEstimate
 
-                // 1) Stationary craft work motion detection (runs even if hardware step sensor is active)
-                // Captures sustained manual work (painting, gypsum, electrical, plumbing) without adding fake steps
-                if ((now - lastWorkMotionSampleMs) >= 200L) {
-                    lastWorkMotionSampleMs = now
-                    if (abs(dynamicAccel) >= 0.48f) {
-                        if (motionWindowStartMs == 0L || (now - motionWindowStartMs) > 4000L) {
-                            motionWindowStartMs = now
-                            motionImpulseCount = 1
-                        } else {
-                            motionImpulseCount++
-                            if (motionImpulseCount >= 6) {
-                                recordWorkMotion(prefs, today, workerId, now)
-                                motionWindowStartMs = now
-                                motionImpulseCount = 0
-                            }
+                // Time-constant (tau = 0.35s) normalized gravity filter — consistent across 15Hz..100Hz sensors
+                val dtSec = if (lastAccelTimestampMs > 0L) {
+                    ((now - lastAccelTimestampMs) / 1000f).coerceIn(0.005f, 0.25f)
+                } else {
+                    0.05f
+                }
+                lastAccelTimestampMs = now
+                val alpha = dtSec / (0.35f + dtSec)
+                gravityEstimate = (1f - alpha) * gravityEstimate + alpha * mag
+                val dynamicAccel = mag - gravityEstimate
+                val absDyn = abs(dynamicAccel)
+
+                // 1) Stationary craft work motion detection (requires sustained multi-second activity per minute)
+                // Filters out phone drops (> 18 m/s^2) and tiny resting noise (< 0.62 m/s^2)
+                if (absDyn in 0.62f..18.0f) {
+                    val secEpoch = now / 1000L
+                    if (secEpoch != currentSecondEpoch) {
+                        currentSecondEpoch = secEpoch
+                        currentSecondImpulses = 1
+                    } else {
+                        currentSecondImpulses++
+                        if (currentSecondImpulses == 2) {
+                            recordSustainedWorkSecond(prefs, today, workerId, now)
                         }
-                    } else if (motionWindowStartMs > 0L && (now - motionWindowStartMs) > 4500L) {
-                        motionWindowStartMs = 0L
-                        motionImpulseCount = 0
                     }
                 }
 
-                // 2) Walking-step fallback: ONLY runs if neither hardware step sensor has fired in the last 4 seconds
-                if ((now - lastHardwareStepMs) < 4000L) return
+                // 2) Walking-step fallback: ONLY runs when no hardware step sensor exists or has fired recently
+                if (hasStepCounterSensor || hasStepDetectorSensor || (now - lastHardwareStepMs) < 5000L) return
 
-                // Reset walking cadence if paused for > 2.0 seconds
-                if (lastAccelStepTimestampMs > 0L && (now - lastAccelStepTimestampMs) > 2000L) {
+                // Reset walking cadence if paused for > 1.9 seconds
+                if (lastAccelStepTimestampMs > 0L && (now - lastAccelStepTimestampMs) > 1900L) {
                     consecutiveRhythmicSteps = 0
                     isWalkingConfirmed = false
                     awaitingTrough = false
                 }
 
                 if (!awaitingTrough) {
-                    // Realistic walking peak for phone in pocket or hand (>= 1.15 m/s^2 above gravity)
-                    if (dynamicAccel >= 1.15f) {
+                    // Realistic walking vertical impulse (rejects gentle hand tilt and extreme vehicle jolts)
+                    if (dynamicAccel in 1.25f..11.5f) {
                         val sinceLastStep = now - lastAccelStepTimestampMs
-                        if (lastAccelStepTimestampMs == 0L || sinceLastStep >= 280L) {
+                        if (lastAccelStepTimestampMs == 0L || sinceLastStep >= 300L) {
                             awaitingTrough = true
                             lastPeakTimestampMs = now
                         }
                     }
                 } else {
                     val sincePeak = now - lastPeakTimestampMs
-                    // Complete 1 walking wave when followed by a downward swing (<= -0.55 m/s^2) within 140ms..850ms
-                    if (sincePeak in 140L..850L && dynamicAccel <= -0.55f) {
+                    // Complete 1 walking wave when followed by a downward swing (<= -0.60 m/s^2) within 130ms..800ms
+                    if (sincePeak in 130L..800L && dynamicAccel <= -0.60f) {
                         awaitingTrough = false
-                        val stepInterval = if (lastAccelStepTimestampMs == 0L) 500L else (now - lastAccelStepTimestampMs)
+                        val stepInterval = if (lastAccelStepTimestampMs == 0L) 520L else (now - lastAccelStepTimestampMs)
                         lastAccelStepTimestampMs = now
-                        if (stepInterval in 280L..1900L) {
+                        if (stepInterval in 300L..1800L) {
                             consecutiveRhythmicSteps++
                         } else {
                             consecutiveRhythmicSteps = 1
                             isWalkingConfirmed = false
                         }
-                        // Confirm real walking after 3 consecutive rhythmic steps (rejects isolated hand/table bumps)
-                        if (!isWalkingConfirmed && consecutiveRhythmicSteps >= 3) {
+                        // Confirm real walking after 4 consecutive rhythmic steps (rejects phone pickup / table bumps)
+                        if (!isWalkingConfirmed && consecutiveRhythmicSteps >= 4) {
                             isWalkingConfirmed = true
                             val current = readLiveSteps(prefs, today, workerId)
-                            recordConfirmedSteps(prefs, today, workerId, current + 3, 3, now)
+                            recordConfirmedSteps(prefs, today, workerId, current + 4, 4, now)
                         } else if (isWalkingConfirmed) {
                             val current = readLiveSteps(prefs, today, workerId)
                             recordConfirmedSteps(prefs, today, workerId, current + 1, 1, now)
                         }
-                    } else if (sincePeak > 850L) {
+                    } else if (sincePeak > 800L) {
                         awaitingTrough = false
                     }
                 }
@@ -484,27 +633,29 @@ object WorkerStepTracker : SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
+    /**
+     * Neutral foreground-service notification on the worker device:
+     * Keeps step/effort/energy metrics hidden from the worker (contractor-only visibility).
+     */
     fun getLiveNotificationSummary(context: Context, workerIdParam: String): String {
-        val prefs = context.applicationContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
-        val today = todayKey()
         val targetId = workerIdParam.trim().ifEmpty { activeWorkerId }
-        if (targetId.isEmpty()) return "جاري قياس الخطوات والنشاط بالموقع"
-        val dayKey = workerDayId(today, targetId)
-        val isSameCache = cachedWorkerDayKey == dayKey && cachedDailySteps >= 0
-        val steps = if (isSameCache) cachedDailySteps else prefs.getInt(workerStepsKey(today, targetId), 0).coerceAtLeast(0)
-        val activeMin = if (isSameCache) cachedActiveMinutes else prefs.getInt(workerActiveMinKey(today, targetId), 0).coerceAtLeast(0)
-        val lastMotion = if (isSameCache) cachedLastMotionAtMs else prefs.getLong(workerLastMotionKey(today, targetId), 0L).coerceAtLeast(0L)
-        val now = System.currentTimeMillis()
-        val statusAr = when {
-            lastMotion <= 0L -> "بانتظار الحركة"
-            (now - lastMotion) <= IDLE_THRESHOLD_MS -> "يعمل بنشاط"
-            else -> "متوقف منذ ${((now - lastMotion) / 60_000L).coerceAtLeast(1L)}د"
+        return if (targetId.isEmpty()) {
+            "متابعة المناوبة في موقع العمل"
+        } else {
+            "المناوبة مسجلة ونشطة في موقع العمل"
         }
-        return "$steps خطوة • $activeMin د نشطة • $statusAr"
     }
 
     @Synchronized
     fun getStepMetricsJson(context: Context, workerIdParam: String = ""): String {
+        // Flush hardware FIFO batch so latest steps are reflected immediately
+        if (isRegistered && hasStepCounterSensor) {
+            try {
+                val sm = context.applicationContext.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+                sm?.flush(this)
+            } catch (_: Exception) {
+            }
+        }
         val prefs = context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
         val today = todayKey()
         val targetWorkerId = workerIdParam.trim().ifEmpty { activeWorkerId }
@@ -537,22 +688,28 @@ object WorkerStepTracker : SensorEventListener {
             else -> "idle"
         }
 
-        val distanceMeters = (steps * 0.75).roundToInt()
-        val calories = (steps * 0.045).roundToInt()
+        val distanceMeters = (steps * 0.74).roundToInt()
+        val calories = computeNativeEnergyKcal(steps, activeMinutes)
         val effortScore = min(100, ((steps.toDouble() / 6000.0) * 100.0).roundToInt())
         val effortStars = when {
-            steps >= 6000 -> 6
-            steps >= 4500 -> 5
-            steps >= 3000 -> 4
-            steps >= 1800 -> 3
-            steps >= 700 -> 2
-            steps > 0 -> 1
+            effortScore >= 100 -> 6
+            effortScore >= 75 -> 5
+            effortScore >= 50 -> 4
+            effortScore >= 30 -> 3
+            effortScore >= 12 -> 2
+            steps > 0 || activeMinutes > 0 -> 1
             else -> 0
+        }
+        val sensorSource = when {
+            hasStepCounterSensor -> "step_counter"
+            hasStepDetectorSensor -> "step_detector"
+            isRegistered -> "accelerometer"
+            else -> "none"
         }
         val activeNow = isRegistered && trackingEnabled && activeWorkerId.isNotEmpty()
         val permGranted = hasActivityRecognitionPermission(context)
         val fgsActive = WorkerShiftMonitorService.isRunning
-        return """{"steps":$steps,"distanceMeters":$distanceMeters,"calories":$calories,"effortScore":$effortScore,"effortStars":$effortStars,"activeMinutes":$activeMinutes,"lastStepAt":$lastStepAt,"lastMotionAt":$lastMotionAt,"recentSteps10m":$recentSteps10m,"recentMotionMin10m":$recentMotionMin10m,"idleMinutes":$idleMinutes,"motionState":"$motionState","foregroundServiceActive":$fgsActive,"sensorActive":$activeNow,"permissionGranted":$permGranted,"date":"$today"}"""
+        return """{"steps":$steps,"distanceMeters":$distanceMeters,"calories":$calories,"effortScore":$effortScore,"effortStars":$effortStars,"activeMinutes":$activeMinutes,"lastStepAt":$lastStepAt,"lastMotionAt":$lastMotionAt,"recentSteps10m":$recentSteps10m,"recentMotionMin10m":$recentMotionMin10m,"idleMinutes":$idleMinutes,"motionState":"$motionState","sensorSource":"$sensorSource","foregroundServiceActive":$fgsActive,"sensorActive":$activeNow,"permissionGranted":$permGranted,"date":"$today"}"""
     }
 
     @Synchronized
@@ -564,6 +721,10 @@ object WorkerStepTracker : SensorEventListener {
         resetCadenceFilter()
         recentStepBuckets.clear()
         recentMotionBuckets.clear()
+        workMinuteEpoch = -1L
+        workMinuteCredited = false
+        workMinuteSteps = 0
+        workMinuteActiveSeconds = 0
         if (targetWorkerId.isNotEmpty()) {
             val dayKey = workerDayId(today, targetWorkerId)
             val k = workerStepsKey(today, targetWorkerId)

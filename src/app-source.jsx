@@ -3,7 +3,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.21";
+        const APP_VERSION = "1.0.22";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -1725,19 +1725,39 @@
             } catch (e) { }
         };
 
-        const getEffortInfo = (rawSteps, lang = 'ar', specialty = '', activeMinutes = 0) => {
+        const getShiftElapsedMinutes = (attRec, nowMs = Date.now()) => {
+            if (window.AlOstaActivityEngine && typeof window.AlOstaActivityEngine.computeShiftElapsedMinutes === 'function') {
+                return window.AlOstaActivityEngine.computeShiftElapsedMinutes(attRec, nowMs);
+            }
+            if (!attRec || !attRec.timeIn) return 0;
+            const startMs = Number(attRec.timeIn) || 0;
+            if (startMs <= 0) return 0;
+            const endMs = Number(attRec.timeOut) > startMs ? Number(attRec.timeOut) : nowMs;
+            return endMs > startMs ? Math.min(840, Math.ceil((endMs - startMs) / 60000)) : 0;
+        };
+
+        const getEffortInfo = (rawSteps, lang = 'ar', specialty = '', activeMinutes = 0, shiftElapsedMinutes = 0) => {
             if (window.AlOstaActivityEngine && typeof window.AlOstaActivityEngine.computeEffortMetrics === 'function') {
                 return window.AlOstaActivityEngine.computeEffortMetrics({
                     steps: rawSteps,
                     activeMinutes,
+                    shiftElapsedMinutes,
                     specialty,
                     lang
                 });
             }
             const steps = Math.max(0, parseInt(rawSteps) || 0);
-            const activeMin = Math.max(0, parseInt(activeMinutes) || 0);
-            const distanceMeters = Math.round(steps * 0.75);
-            const calories = Math.round(steps * 0.045);
+            const rawActive = Math.max(0, Math.min(720, parseInt(activeMinutes) || 0));
+            const safeShift = Math.max(0, parseInt(shiftElapsedMinutes) || 0);
+            const activeMin = safeShift > 0 ? Math.min(rawActive, safeShift) : rawActive;
+            const distanceMeters = Math.round(steps * 0.74);
+            const distanceText = distanceMeters >= 1000
+                ? (lang === 'ar' ? `${(distanceMeters / 1000).toFixed(2).replace(/\.?0+$/, '')} كم` : `${(distanceMeters / 1000).toFixed(2).replace(/\.?0+$/, '')} km`)
+                : (lang === 'ar' ? `${distanceMeters} م` : `${distanceMeters}m`);
+            const walkingMinEst = steps / 95;
+            const extraStationaryMin = Math.max(0, activeMin - walkingMinEst);
+            const calories = Math.round(steps * 0.044 + extraStationaryMin * 2.6);
+            const energyText = lang === 'ar' ? `${calories} سعرة` : `${calories} kcal`;
             const effortScore = Math.min(100, Math.round((steps / 6000) * 100));
             const effortStars = steps >= 6000 ? 6 : steps >= 4500 ? 5 : steps >= 3000 ? 4 : steps >= 1800 ? 3 : steps >= 700 ? 2 : steps > 0 ? 1 : 0;
             let label = '';
@@ -1761,7 +1781,7 @@
                 label = lang === 'ar' ? 'بانتظار الحركة' : 'Idle';
                 badgeClass = 'bg-slate-100 dark:bg-slate-800 text-slate-400';
             }
-            return { steps, activeMinutes: activeMin, distanceMeters, calories, effortScore, effortStars, stepTarget: 6000, activeMinTarget: 240, tradeType: 'mobile', label, badgeClass };
+            return { steps, activeMinutes: activeMin, distanceMeters, distanceText, calories, energyText, effortScore, effortStars, stepTarget: 6000, activeMinTarget: 240, tradeType: 'mobile', label, badgeClass };
         };
 
         const getVerifiedWorkerActiveMinutes = (w, attRec, targetDate = todayStr()) => {
@@ -1804,6 +1824,14 @@
             try {
                 if (window.AndroidApp && window.AndroidApp.setStepTrackingState) {
                     window.AndroidApp.setStepTrackingState(Boolean(enabled), String(workerId || ''));
+                }
+            } catch (e) { }
+        };
+
+        const setNativeStepSiteBounds = (inBounds = true) => {
+            try {
+                if (window.AndroidApp && window.AndroidApp.setStepSiteBounds) {
+                    window.AndroidApp.setStepSiteBounds(Boolean(inBounds));
                 }
             } catch (e) { }
         };
@@ -4901,12 +4929,26 @@
                     }
                     setWorkerTelemetryMap(prev => ({ ...prev, ...nextMap }));
                     setTelemetryLastFetchAt(Date.now());
-                    // Optional on-demand wake ping: asks active clocked-in workers to flush exact steps immediately
+                    // Optional on-demand wake ping: asks active clocked-in workers to flush exact steps immediately,
+                    // then re-reads the single crew board doc once after 3.5s so fresh readings appear automatically.
                     if (wakeWorkers && activeOnShiftWorkerIds.length > 0) {
                         const shortLeaseUntil = Date.now() + 90000;
                         activeOnShiftWorkerIds.slice(0, 40).forEach(wid => {
                             db.collection('worker_telemetry').doc(wid).set({ watchUntil: shortLeaseUntil, lastPingAt: Date.now() }, { merge: true }).catch(() => {});
                         });
+                        setTimeout(async () => {
+                            try {
+                                const followSnap = await db.collection('worker_telemetry').doc(crewBoardDocId).get({ source: 'server', timeoutMs: 5000 });
+                                if (followSnap && followSnap.exists) {
+                                    const fbData = followSnap.data() || {};
+                                    if (fbData.workers && typeof fbData.workers === 'object') {
+                                        setWorkerTelemetryMap(prev => ({ ...prev, ...fbData.workers }));
+                                        setTelemetryLastFetchAt(Date.now());
+                                        telemetryLastFetchRef.current = Date.now();
+                                    }
+                                }
+                            } catch (e) {}
+                        }, 3500);
                     }
                 } catch (e) {
                 } finally {
@@ -6193,6 +6235,7 @@
                 haptic();
                 try {
                     resetNativeStepMetrics(workerObj.id);
+                    const resetNonce = Date.now();
                     const resetPayload = {
                         workerId: workerObj.id,
                         adminId: workerObj.adminId || adminId,
@@ -6206,6 +6249,7 @@
                         lastStepAt: 0,
                         lastMotionAt: 0,
                         motionState: 'waiting',
+                        resetNonce,
                         todayEffortDate: todayStr(),
                         todayStepEngineV2: true
                     };
@@ -6215,7 +6259,7 @@
                         db.collection('worker_telemetry').doc(`crew_${targetCrewAdmin}`).set({
                             adminId: targetCrewAdmin,
                             isCrewBoard: true,
-                            updatedAt: Date.now(),
+                            updatedAt: resetNonce,
                             workers: { [workerObj.id]: resetPayload }
                         }, { merge: true }).catch(() => {});
                     }
@@ -9053,9 +9097,11 @@
                                                 {(() => {
                                                     const todayRec = data.attendance.find(a => a.workerId === w.id && a.date === todayStr());
                                                     const currentSteps = getVerifiedWorkerTodaySteps(w, todayRec, todayStr());
-                                                    const activeMinutes = getVerifiedWorkerActiveMinutes(w, todayRec, todayStr());
+                                                    const rawActiveMinutes = getVerifiedWorkerActiveMinutes(w, todayRec, todayStr());
+                                                    const shiftElapsedMin = getShiftElapsedMinutes(todayRec, activityNowMs);
                                                     const liveStatus = getWorkerLiveStatus(w, todayRec, activityNowMs, lang);
-                                                    const eff = getEffortInfo(currentSteps, lang, w.specialty || '', activeMinutes);
+                                                    const eff = getEffortInfo(currentSteps, lang, w.specialty || '', rawActiveMinutes, shiftElapsedMin);
+                                                    const activeMinutes = eff.activeMinutes;
                                                     const radius = 28;
                                                     const circumference = 2 * Math.PI * radius;
                                                     const strokeDashoffset = circumference - (eff.effortScore / 100) * circumference;
@@ -9137,11 +9183,11 @@
                                                                 </div>
                                                                 <div>
                                                                     <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '📍 المسافة' : '📍 Dist'}</p>
-                                                                    <p className="text-[11px] font-black text-emerald-600 dark:text-emerald-400 dir-ltr">{eff.distanceMeters}m</p>
+                                                                    <p className="text-[11px] font-black text-emerald-600 dark:text-emerald-400">{eff.distanceText || `${eff.distanceMeters}m`}</p>
                                                                 </div>
                                                                 <div>
                                                                     <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '🔥 الطاقة' : '🔥 Energy'}</p>
-                                                                    <p className="text-[11px] font-black text-amber-500 dir-ltr">{eff.calories}</p>
+                                                                    <p className="text-[11px] font-black text-amber-500">{eff.energyText || `${eff.calories}`}</p>
                                                                 </div>
                                                             </div>
                                                         </div>
@@ -9350,15 +9396,17 @@
                                                     )}
                                                     {(() => {
                                                         const stepCount = getVerifiedWorkerTodaySteps(w, r, selectedDate);
-                                                        const activeMin = getVerifiedWorkerActiveMinutes(w, r, selectedDate);
-                                                        const eff = getEffortInfo(stepCount, lang, w.specialty || '', activeMin);
+                                                        const rawActiveMin = getVerifiedWorkerActiveMinutes(w, r, selectedDate);
+                                                        const shiftElapsedMin = getShiftElapsedMinutes(r, activityNowMs);
+                                                        const eff = getEffortInfo(stepCount, lang, w.specialty || '', rawActiveMin, shiftElapsedMin);
+                                                        const activeMin = eff.activeMinutes;
                                                         const liveSt = selectedDate === todayStr() ? getWorkerLiveStatus(w, r, activityNowMs, lang) : null;
                                                         return (
                                                             <div className="flex flex-col gap-2">
                                                                 <div className="flex justify-between items-center gap-1 flex-wrap">
                                                                     <span className="flex items-center gap-1 text-indigo-600 dark:text-indigo-400 font-black">
                                                                         <Icon name="activity" size={13} />
-                                                                        <span>{lang === 'ar' ? `الجهد: ${eff.steps.toLocaleString('en-US')} خطوة • ${activeMin}د نشطة (${eff.distanceMeters}م)` : `Effort: ${eff.steps.toLocaleString('en-US')} steps • ${activeMin}m active`}</span>
+                                                                        <span>{lang === 'ar' ? `الجهد: ${eff.steps.toLocaleString('en-US')} خطوة • ${activeMin}د نشطة • 🔥 ${eff.calories} سعرة (${eff.distanceText || `${eff.distanceMeters}م`})` : `Effort: ${eff.steps.toLocaleString('en-US')} steps • ${activeMin}m active • 🔥 ${eff.calories} kcal`}</span>
                                                                     </span>
                                                                     <div className="flex items-center gap-1">
                                                                         {liveSt && liveSt.code !== 'off_shift' && (
@@ -10452,7 +10500,7 @@
                                             </div>
                                         ))}
                                         {records.map(a => {
-                                            const eff = getEffortInfo(getVerifiedRecordSteps(a), lang, historyWorker?.specialty || '', parseInt(a.activeMinutes) || 0);
+                                            const eff = getEffortInfo(getVerifiedRecordSteps(a), lang, historyWorker?.specialty || '', parseInt(a.activeMinutes) || 0, getShiftElapsedMinutes(a, activityNowMs));
                                             return (
                                                 <div key={a.id} className="bg-slate-50 dark:bg-slate-900 p-3 rounded-xl border dark:border-slate-700 flex justify-between items-center">
                                                     <div>
@@ -10460,7 +10508,7 @@
                                                         <span className="text-[10px] font-bold text-slate-400">{a.status === 'full' ? tr('fullDay') : a.status === 'half' ? tr('halfDay') : tr('absent')}</span>
                                                         {(eff.steps > 0 || eff.activeMinutes > 0) && (
                                                             <span className="text-[10px] font-black text-indigo-600 dark:text-indigo-400 block mt-0.5">
-                                                                👣 {eff.steps.toLocaleString('en-US')} {lang === 'ar' ? 'خطوة' : 'steps'}{eff.activeMinutes > 0 ? ` • ⏱ ${eff.activeMinutes}${lang === 'ar' ? 'د' : 'm'}` : ''} ({eff.effortScore}% • {eff.label})
+                                                                👣 {eff.steps.toLocaleString('en-US')} {lang === 'ar' ? 'خطوة' : 'steps'}{eff.activeMinutes > 0 ? ` • ⏱ ${eff.activeMinutes}${lang === 'ar' ? 'د' : 'm'}` : ''} • 🔥 {eff.energyText || `${eff.calories}`} ({eff.effortScore}% • {eff.label})
                                                             </span>
                                                         )}
                                                     </div>
@@ -10499,8 +10547,8 @@
                                         </div>
                                         <p className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
                                             {lang === 'ar'
-                                                ? `معدل الخطوات المسجل: ${eff.steps.toLocaleString('en-US')} خطوة (${eff.distanceMeters} متر) • مؤشر الجهد: ${eff.effortScore}%`
-                                                : `Recorded steps: ${eff.steps.toLocaleString('en-US')} (${eff.distanceMeters}m) • Effort Index: ${eff.effortScore}%`}
+                                                ? `معدل الخطوات: ${eff.steps.toLocaleString('en-US')} خطوة (${eff.distanceText || `${eff.distanceMeters}م`}) • عمل نشط: ${eff.activeMinutes}د • الطاقة: ${eff.calories} سعرة • الجهد: ${eff.effortScore}%`
+                                                : `Avg steps: ${eff.steps.toLocaleString('en-US')} (${eff.distanceText || `${eff.distanceMeters}m`}) • Active: ${eff.activeMinutes}m • Energy: ${eff.calories} kcal • Effort: ${eff.effortScore}%`}
                                         </p>
                                         {eff.effortStars > 0 && (
                                             <button
@@ -12117,7 +12165,6 @@
             const [workerMatModal, setWorkerMatModal] = useState(false);
             const [liveGps, setLiveGps] = useState({ coords: null, rawDist: null, effectiveDist: null, inBounds: null, error: null, updatedAt: null });
             const [leftSiteWarning, setLeftSiteWarning] = useState(null);
-            const [stepMetrics, setStepMetrics] = useState(() => readNativeStepMetrics(worker.id));
             const [shiftElapsedStr, setShiftElapsedStr] = useState('00:00:00');
             const outOfBoundsAlertSentRef = useRef({});
             const lastSyncedStepsRef = useRef(0);
@@ -12141,10 +12188,22 @@
                         if (doc.exists) setLW(prev => ({ ...prev, id: doc.id, ...doc.data() }));
                         setWorkerSyncing(false);
                     }),
-                    // Quiet control channel: stays silent during Eco Mode (0 reads/day!), wakes worker ONLY when contractor starts Live Radar
+                    // Quiet control channel: wakes worker for Contractor Live Radar AND honors remote contractor step resets
                     db.collection('worker_telemetry').doc(worker.id).onSnapshot(doc => {
                         if (doc.exists) {
                             const td = doc.data() || {};
+                            const remoteResetNonce = Number(td.resetNonce || 0);
+                            if (remoteResetNonce > 0) {
+                                const nonceKey = `alosta_step_reset_nonce_${worker.id}`;
+                                let lastAppliedNonce = 0;
+                                try { lastAppliedNonce = Number(localStorage.getItem(nonceKey) || 0); } catch (e) {}
+                                if (remoteResetNonce > lastAppliedNonce) {
+                                    try { localStorage.setItem(nonceKey, String(remoteResetNonce)); } catch (e) {}
+                                    resetNativeStepMetrics(worker.id);
+                                    lastSyncedStepsRef.current = 0;
+                                    lastSyncedActiveMinRef.current = 0;
+                                }
+                            }
                             const nextWatchUntil = Number(td.watchUntil || 0);
                             if (nextWatchUntil > Date.now() && nextWatchUntil !== workerWatchUntilRef.current) {
                                 workerWatchUntilRef.current = nextWatchUntil;
@@ -12359,7 +12418,50 @@
                     const secs = String(diffSec % 60).padStart(2, '0');
                     setShiftElapsedStr(`${hrs}:${mins}:${secs}`);
                     if (diffSec >= 8 * 3600) {
-                        db.collection('attendance').doc(tA.id).update({ timeOut: Date.now(), outStatus: 'valid' }).catch(() => { });
+                        const autoNow = Date.now();
+                        const m = readNativeStepMetrics(lW.id);
+                        const finalActiveMin = Math.max(m.activeMinutes || 0, parseInt(tA.activeMinutes) || 0);
+                        const finalSteps = Math.max(m.steps || 0, getVerifiedRecordSteps(tA));
+                        const shiftMin = getShiftElapsedMinutes(tA, autoNow);
+                        const eff = getEffortInfo(finalSteps, lang, lW.specialty || '', finalActiveMin, shiftMin);
+                        db.collection('attendance').doc(tA.id).update({
+                            timeOut: autoNow,
+                            outStatus: 'valid',
+                            steps: eff.steps,
+                            distanceMeters: eff.distanceMeters,
+                            calories: eff.calories,
+                            effortScore: eff.effortScore,
+                            effortStars: eff.effortStars,
+                            activeMinutes: eff.activeMinutes,
+                            sensorConnected: false,
+                            motionState: 'off_shift',
+                            stepEngineV2: true
+                        }).catch(() => { });
+                        const autoAdminId = activeProject?.adminId || lW.adminId || '';
+                        const autoTelemetry = {
+                            workerId: lW.id,
+                            adminId: autoAdminId,
+                            todaySteps: eff.steps,
+                            todayDistanceMeters: eff.distanceMeters,
+                            todayCalories: eff.calories,
+                            todayEffortScore: eff.effortScore,
+                            todayEffortStars: eff.effortStars,
+                            todayActiveMinutes: eff.activeMinutes,
+                            sensorConnected: false,
+                            motionState: 'off_shift',
+                            lastHeartbeatAt: autoNow,
+                            todayEffortDate: todayStr(),
+                            todayStepEngineV2: true
+                        };
+                        db.collection('worker_telemetry').doc(lW.id).set(autoTelemetry, { merge: true }).catch(() => {});
+                        if (autoAdminId) {
+                            db.collection('worker_telemetry').doc(`crew_${autoAdminId}`).set({
+                                adminId: autoAdminId,
+                                isCrewBoard: true,
+                                updatedAt: autoNow,
+                                workers: { [lW.id]: autoTelemetry }
+                            }, { merge: true }).catch(() => {});
+                        }
                     }
                 };
                 updateClock();
@@ -12367,15 +12469,38 @@
                 return () => clearInterval(timer);
             }, [tA?.id, tA?.timeIn, tA?.timeOut]);
 
-            // Keep hardware step sensor bound ONLY to shift active state & worker ID (never reset when step count updates!)
+            // Keep hardware step sensor bound ONLY to shift active state & worker ID.
+            // Wait for initial Firestore sync before turning OFF so reopening mid-shift never drops the active FGS/baseline.
             const isShiftActiveForSteps = isWorkerShiftRunning;
 
             useEffect(() => {
-                setNativeStepTracking(isShiftActiveForSteps, isShiftActiveForSteps ? lW.id : '');
+                if (isShiftActiveForSteps) {
+                    setNativeStepTracking(true, lW.id);
+                } else if (!workerSyncing) {
+                    setNativeStepTracking(false, '');
+                }
+            }, [isShiftActiveForSteps, workerSyncing, lW.id]);
+
+            useEffect(() => {
                 return () => {
                     setNativeStepTracking(false, '');
                 };
-            }, [isShiftActiveForSteps, lW.id]);
+            }, []);
+
+            // Pause step accumulation if worker is confirmed well outside project site geofence (> allowedRadius + 50m)
+            useEffect(() => {
+                if (!isShiftActiveForSteps) {
+                    setNativeStepSiteBounds(true);
+                    return;
+                }
+                const confirmedFarOutside = Boolean(
+                    activeSiteCoords &&
+                    liveGps.inBounds === false &&
+                    Number.isFinite(liveGps.effectiveDist) &&
+                    liveGps.effectiveDist > (allowedRadius + 50)
+                );
+                setNativeStepSiteBounds(!confirmedFarOutside);
+            }, [isShiftActiveForSteps, activeSiteCoords, liveGps.inBounds, liveGps.effectiveDist, allowedRadius]);
 
             // Poll hardware step counter & sync to Firestore while worker is clocked into an active shift
             useEffect(() => {
@@ -12448,17 +12573,17 @@
                     const verifiedRecSteps = getVerifiedRecordSteps(tA);
                     const currentSteps = Math.max(m.steps || 0, verifiedRecSteps);
                     const recActiveMin = (tA && tA.stepEngineV2 === true) ? (parseInt(tA.activeMinutes) || 0) : 0;
-                    const currentActiveMin = Math.max(m.activeMinutes || 0, recActiveMin);
-                    // Live local UI update (100% precision every 2.5s at 0 cloud cost)
-                    setStepMetrics({ ...m, steps: currentSteps, activeMinutes: currentActiveMin });
+                    const rawActiveMin = Math.max(m.activeMinutes || 0, recActiveMin);
+                    const nowMs = Date.now();
+                    const shiftElapsedMin = getShiftElapsedMinutes(tA, nowMs);
 
-                    const eff = getEffortInfo(currentSteps, lang, lW.specialty || '', currentActiveMin);
+                    const eff = getEffortInfo(currentSteps, lang, lW.specialty || '', rawActiveMin, shiftElapsedMin);
+                    const currentActiveMin = eff.activeMinutes;
                     const stepDelta = Math.abs(currentSteps - lastSyncedStepsRef.current);
                     const activeMinDelta = Math.abs(currentActiveMin - lastSyncedActiveMinRef.current);
                     const gpsNow = liveGpsRef.current || {};
                     const currentInBounds = typeof gpsNow.inBounds === 'boolean' ? gpsNow.inBounds : null;
                     const inBoundsChanged = currentInBounds !== null && lastSyncedInBoundsRef.current !== currentInBounds;
-                    const nowMs = Date.now();
                     const elapsedSinceSync = nowMs - lastCloudSyncTime;
 
                     const lastStepAt = Math.max(Number(m.lastStepAt || 0), Number(tA?.lastStepAt || 0));
@@ -12766,13 +12891,21 @@
                         }
                     } catch (err) { status = 'no_gps'; }
 
-                    setNativeStepTracking(false, '');
                     const m = readNativeStepMetrics(lW.id);
-                    const finalActiveMin = Math.max(m.activeMinutes || 0, parseInt(tA.activeMinutes) || 0);
-                    const eff = getEffortInfo(Math.max(m.steps || 0, getVerifiedRecordSteps(tA)), lang, lW.specialty || '', finalActiveMin);
+                    setNativeStepTracking(false, '');
+                    const finalRawActiveMin = Math.max(m.activeMinutes || 0, parseInt(tA.activeMinutes) || 0);
+                    const checkoutNowMs = Date.now();
+                    const eff = getEffortInfo(
+                        Math.max(m.steps || 0, getVerifiedRecordSteps(tA)),
+                        lang,
+                        lW.specialty || '',
+                        finalRawActiveMin,
+                        getShiftElapsedMinutes(tA, checkoutNowMs)
+                    );
+                    const finalActiveMin = eff.activeMinutes;
 
                     await db.collection('attendance').doc(tA.id).update({
-                        timeOut: Date.now(),
+                        timeOut: checkoutNowMs,
                         outLoc: coords,
                         outDist: distance !== null && isFinite(distance) ? Math.round(distance) : null,
                         outStatus: status,
@@ -13192,46 +13325,9 @@
                                         <span className="font-mono font-black text-base text-slate-800 dark:text-slate-100 dir-ltr tracking-wider">{shiftElapsedStr}</span>
                                     </div>
 
-                                    {(() => {
-                                        const liveEff = getEffortInfo(stepMetrics.steps || 0, lang, lW.specialty || '', stepMetrics.activeMinutes || 0);
-                                        const isMoving = stepMetrics.motionState === 'active';
-                                        const isIdle = stepMetrics.motionState === 'idle';
-                                        return (
-                                            <div className="my-2.5 bg-slate-50 dark:bg-slate-900/80 p-3 rounded-2xl border border-indigo-100 dark:border-slate-700 space-y-2 text-right">
-                                                <div className="flex items-center justify-between gap-2">
-                                                    <span className="text-[10.5px] font-black text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
-                                                        <Icon name="activity" size={14} className="text-indigo-600 dark:text-indigo-400" />
-                                                        <span>{lang === 'ar' ? 'قياس الجهد والنشاط المباشر' : 'Live Activity & Effort'}</span>
-                                                    </span>
-                                                    <span className={`px-2 py-0.5 rounded-full text-[9px] font-black ${isMoving ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300' : isIdle ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300' : 'bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-300'}`}>
-                                                        {isMoving
-                                                            ? (lang === 'ar' ? '🟢 نشط الآن' : '🟢 Active')
-                                                            : isIdle
-                                                                ? (lang === 'ar' ? `🟡 توقف ${stepMetrics.idleMinutes || 10}د` : `🟡 Idle ${stepMetrics.idleMinutes || 10}m`)
-                                                                : (lang === 'ar' ? '📡 حساس الخلفية شغال' : '📡 Sensor Ready')}
-                                                    </span>
-                                                </div>
-                                                <div className="grid grid-cols-3 gap-2 text-center bg-white dark:bg-slate-800 p-2 rounded-xl border dark:border-slate-700">
-                                                    <div>
-                                                        <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '👣 الخطوات' : '👣 Steps'}</p>
-                                                        <p className="text-xs font-black text-indigo-600 dark:text-indigo-400 dir-ltr">{liveEff.steps.toLocaleString('en-US')}</p>
-                                                    </div>
-                                                    <div>
-                                                        <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '⏱ عمل نشط' : '⏱ Active'}</p>
-                                                        <p className="text-xs font-black text-teal-600 dark:text-teal-400 dir-ltr">{liveEff.activeMinutes}{lang === 'ar' ? 'د' : 'm'}</p>
-                                                    </div>
-                                                    <div>
-                                                        <p className="text-[8.5px] font-bold text-slate-400">{lang === 'ar' ? '⚡ الجهد' : '⚡ Effort'}</p>
-                                                        <p className="text-xs font-black text-emerald-600 dark:text-emerald-400 dir-ltr">{liveEff.effortScore}%</p>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        );
-                                    })()}
-
                                     {activeSiteCoords && (
                                         <p className="text-[11px] font-bold text-slate-400 mb-2">
-                                            {lang === 'ar' ? 'الرادار الجغرافي وحساس النشاط يعملان تلقائياً أثناء المناوبة' : 'GPS Radar & Activity Sensor are active during shift'}
+                                            {lang === 'ar' ? 'التحقق الجغرافي لموقع العمل يعمل تلقائياً أثناء المناوبة' : 'Site GPS verification is active during shift'}
                                         </p>
                                     )}
                                     <button onClick={() => { haptic(); doClockOut(); }} disabled={gpsLoading} className="w-full bg-rose-50 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400 py-4 rounded-2xl font-black mt-2 border border-rose-200 dark:border-rose-800 active:scale-95 flex items-center justify-center gap-2">

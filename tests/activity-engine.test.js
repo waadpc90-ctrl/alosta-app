@@ -141,3 +141,53 @@ test('summarizeCrewActivity aggregates live crew statuses accurately', () => {
         onShiftTotal: 4
     });
 });
+
+test('Biomechanical MET energy, shift-duration cap on activeMinutes, and distance formatting are accurate', () => {
+    // 1. Shift-duration physiological cap prevents activeMinutes from exceeding actual elapsed shift time
+    const capped = ActivityEngine.computeEffortMetrics({
+        steps: 800,
+        activeMinutes: 180, // inflated / erroneous value
+        shiftElapsedMinutes: 30, // worker only on shift for 30 minutes
+        specialty: 'صباغ',
+        lang: 'ar'
+    });
+    assert.equal(capped.activeMinutes, 30, 'activeMinutes must be capped by shiftElapsedMinutes');
+    assert.equal(capped.distanceMeters, 592);
+    assert.equal(capped.distanceText, '592 م');
+    assert.ok(capped.calories > 50 && capped.calories < 130, `Expected realistic 30m calories, got ${capped.calories}`);
+    assert.equal(capped.energyText, `${capped.calories} سعرة`);
+
+    // 2. Painter working 3 hours (1,600 steps + 180 active min) burns realistic MET active calories (~450-500 kcal)
+    const painter = ActivityEngine.computeEffortMetrics({
+        steps: 1600,
+        activeMinutes: 180,
+        shiftElapsedMinutes: 240,
+        specialty: 'صباغ',
+        lang: 'ar'
+    });
+    assert.ok(painter.calories >= 440 && painter.calories <= 520, `Unexpected painter calories: ${painter.calories}`);
+    assert.equal(painter.distanceText, '1.18 كم');
+
+    // 3. Heavy mobile laborer (6,000 steps + 200 active min) burns higher MET active calories (~650-710 kcal)
+    const laborer = ActivityEngine.computeEffortMetrics({
+        steps: 6000,
+        activeMinutes: 200,
+        shiftElapsedMinutes: 300,
+        specialty: 'عامل عادي',
+        lang: 'ar'
+    });
+    assert.ok(laborer.calories >= 640 && laborer.calories <= 720, `Unexpected laborer calories: ${laborer.calories}`);
+    assert.equal(laborer.distanceText, '4.44 كم');
+
+    // 4. Zero activity always yields 0 kcal and 0% effort
+    const zero = ActivityEngine.computeEffortMetrics({ steps: 0, activeMinutes: 0, specialty: 'كهربائي', lang: 'ar' });
+    assert.equal(zero.calories, 0);
+    assert.equal(zero.effortScore, 0);
+    assert.equal(zero.effortStars, 0);
+
+    // 5. Shift elapsed minute calculator handles open and closed shifts cleanly
+    const t0 = 1_700_000_000_000;
+    assert.equal(ActivityEngine.computeShiftElapsedMinutes({ timeIn: t0 }, t0 + 45 * 60_000), 45);
+    assert.equal(ActivityEngine.computeShiftElapsedMinutes({ timeIn: t0, timeOut: t0 + 120 * 60_000 }, t0 + 300 * 60_000), 120);
+});
+

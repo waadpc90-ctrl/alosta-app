@@ -146,4 +146,19 @@ class ExampleUnitTest {
         assertTrue(jobTitle.contains("متقدم"))
         assertTrue(jobBody.contains("سجاد"))
     }
+
+    @Test
+    fun workerStepTracker_energyAndPlausibilityGuard_arePhysiologicallyAccurate() {
+        assertEquals(0, WorkerStepTracker.computeNativeEnergyKcal(0, 0))
+        val painterKcal = WorkerStepTracker.computeNativeEnergyKcal(1600, 180)
+        assertTrue("Expected realistic painter kcal (450..530), got $painterKcal", painterKcal in 450..530)
+
+        // Realistic walking: 120 steps in 60 seconds (~2 steps/sec) -> valid
+        assertTrue(WorkerStepTracker.isPlausibleStepDelta(120, 60_000L))
+        // Impossible vibration/vehicle jump: 1500 steps in 30 seconds (50 steps/sec) -> rejected
+        assertFalse(WorkerStepTracker.isPlausibleStepDelta(1500, 30_000L))
+        // Huge off-shift spike > 2500 -> rejected
+        assertFalse(WorkerStepTracker.isPlausibleStepDelta(3000, 3_600_000L))
+    }
 }
+

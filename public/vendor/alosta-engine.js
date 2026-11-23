@@ -1,4 +1,4 @@
-/* Al-Osta Modular Architecture Engine v1.0.17 */
+/* Al-Osta Modular Architecture Engine v1.0.22 */
 /**
  * Module 01: Al-Osta Enterprise Security, Auth UID Session Binding, Brute-Force Guard & Shared Config Bus
  * Solves: Client-side session tampering, refresh-bypass on login lockouts, duplicate app_config listeners.
@@ -165,7 +165,6 @@
 
     global.AlOstaAppConfigBus = createAppConfigBus();
 })(typeof window !== 'undefined' ? window : globalThis);
-
 
 /**
  * Module 03: Al-Osta Adaptive Image Compressor, Blob Decoupling (`blob://media_...`) & Lazy Resolver
@@ -366,7 +365,6 @@
         getCachedMediaBlobSync
     });
 })(typeof window !== 'undefined' ? window : globalThis);
-
 
 /**
  * Module 02: Al-Osta High-Performance O(1) Indexed Financial Aggregator & Monthly Snapshot Archiver
@@ -662,7 +660,6 @@
     });
 })(typeof window !== 'undefined' ? window : this);
 
-
 /**
  * Module 04: Al-Osta Differential IndexedDB Vault, Sync Queue State Tracker & Financial Audit Logger
  * Solves: 5MB localStorage ceiling, full-DB JSON.stringify jank on every write, silent cloud drops, and audit trail.
@@ -908,7 +905,6 @@
     });
 })(typeof window !== 'undefined' ? window : globalThis);
 
-
 /**
  * Module 05: Al-Osta Precision Worker Activity, Trade-Calibrated Effort & 4-State Live Status Engine
  * Combines 4 signals: Shift state + Heartbeat freshness + GPS site geofence + Recent motion/step window.
@@ -963,16 +959,44 @@
         return rem > 0 ? `${hStr} و${rem}د` : hStr;
     };
 
-    const computeEffortMetrics = ({ steps = 0, activeMinutes = 0, specialty = '', lang = 'ar' } = {}) => {
+    const formatDistance = (meters = 0, lang = 'ar') => {
+        const m = Math.max(0, Math.round(Number(meters) || 0));
+        if (m >= 1000) {
+            const km = (m / 1000).toFixed(2).replace(/\.?0+$/, '');
+            return lang === 'ar' ? `${km} كم` : `${km} km`;
+        }
+        return lang === 'ar' ? `${m} م` : `${m}m`;
+    };
+
+    const computeShiftElapsedMinutes = (attRec = null, nowMs = Date.now()) => {
+        if (!attRec || !attRec.timeIn) return 0;
+        const startMs = Number(attRec.timeIn) || 0;
+        if (startMs <= 0) return 0;
+        const endMs = Number(attRec.timeOut) > startMs ? Number(attRec.timeOut) : nowMs;
+        if (endMs <= startMs) return 0;
+        // Cap at 14 hours (840 min) for physiological sanity
+        return Math.min(840, Math.ceil((endMs - startMs) / 60000));
+    };
+
+    const computeEffortMetrics = ({ steps = 0, activeMinutes = 0, shiftElapsedMinutes = 0, specialty = '', lang = 'ar' } = {}) => {
         const safeSteps = Math.max(0, parseInt(steps, 10) || 0);
-        const safeActiveMin = Math.max(0, parseInt(activeMinutes, 10) || 0);
+        const rawActiveMin = Math.max(0, Math.min(720, parseInt(activeMinutes, 10) || 0));
+        const safeShiftMin = Math.max(0, parseInt(shiftElapsedMinutes, 10) || 0);
+        // Never allow recorded active minutes to exceed actual elapsed shift time when shift window is known
+        const safeActiveMin = safeShiftMin > 0 ? Math.min(rawActiveMin, safeShiftMin) : rawActiveMin;
         const target = getTradeEffortTarget(specialty);
 
-        const distanceMeters = Math.round(safeSteps * 0.75);
-        // Active stationary work burns ~1.8 kcal/min in addition to walking steps when activeMinutes exceed walking time
-        const walkingMinEst = safeSteps / 90;
+        // Standard site stride length (~0.74m per step)
+        const distanceMeters = Math.round(safeSteps * 0.74);
+
+        // Trade-calibrated MET active energy (kcal above resting, 75 kg reference adult):
+        // - Walking at ~95 steps/min burns ~0.042 kcal/step (craft) or ~0.046 kcal/step (heavy/mobile site work)
+        // - Non-overlapping sustained stationary craft work burns ~2.5 kcal/min (stationary trade) or ~2.9 kcal/min (heavy trade)
+        const walkingMinEst = safeSteps / 95;
         const extraStationaryMin = Math.max(0, safeActiveMin - walkingMinEst);
-        const calories = Math.round(safeSteps * 0.045 + extraStationaryMin * 1.8);
+        const kcalPerStep = target.tradeType === 'stationary' ? 0.042 : 0.046;
+        const stationaryKcalPerMin = target.tradeType === 'stationary' ? 2.5 : 2.9;
+        const calories = Math.round(safeSteps * kcalPerStep + extraStationaryMin * stationaryKcalPerMin);
 
         const stepPct = Math.min(100, (safeSteps / target.stepTarget) * 100);
         let effortScore = Math.round(stepPct);
@@ -1018,7 +1042,9 @@
             steps: safeSteps,
             activeMinutes: safeActiveMin,
             distanceMeters,
+            distanceText: formatDistance(distanceMeters, lang),
             calories,
+            energyText: lang === 'ar' ? `${calories} سعرة` : `${calories} kcal`,
             effortScore,
             effortStars,
             stepTarget: target.stepTarget,
@@ -1254,6 +1280,8 @@
         SHIFT_WARMUP_GRACE_MS,
         getTradeEffortTarget,
         formatDurationShort,
+        formatDistance,
+        computeShiftElapsedMinutes,
         computeEffortMetrics,
         classifyWorkerLiveStatus,
         summarizeCrewActivity

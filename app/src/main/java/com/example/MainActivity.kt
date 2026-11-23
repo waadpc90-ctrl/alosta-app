@@ -662,6 +662,14 @@ class AndroidAppBridge(
     }
 
     @JavascriptInterface
+    fun setStepSiteBounds(inBounds: Boolean) {
+        try {
+            WorkerStepTracker.setInSiteBounds(inBounds)
+        } catch (_: Exception) {
+        }
+    }
+
+    @JavascriptInterface
     fun getWorkerSteps(): String {
         return try {
             WorkerStepTracker.getStepMetricsJson(context)
