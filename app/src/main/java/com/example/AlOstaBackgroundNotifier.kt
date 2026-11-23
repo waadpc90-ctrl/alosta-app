@@ -623,6 +623,57 @@ object AlOstaBackgroundNotifier {
         return null
     }
 
+    internal fun getFirebaseRestCredentials(
+        context: Context,
+        fallbackProjectId: String = "",
+        fallbackApiKey: String = ""
+    ): Pair<String, String>? {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val projectId = prefs.getString(KEY_PROJECT_ID, "")?.trim().orEmpty().ifBlank { fallbackProjectId.trim() }
+        val apiKey = prefs.getString(KEY_API_KEY, "")?.trim().orEmpty().ifBlank { fallbackApiKey.trim() }
+        if (projectId.isEmpty() || apiKey.isEmpty()) return null
+        if (prefs.getString(KEY_PROJECT_ID, "").isNullOrBlank() && projectId.isNotBlank()) {
+            prefs.edit().putString(KEY_PROJECT_ID, projectId).putString(KEY_API_KEY, apiKey).apply()
+        }
+        val token = getOrRefreshAnonymousIdToken(prefs, apiKey) ?: return null
+        return Pair(projectId, token)
+    }
+
+    internal fun postUrgentLocalNotification(context: Context, title: String, body: String) {
+        postSystemNotification(context, title, body)
+    }
+
+    internal fun httpRequestJson(
+        method: String,
+        urlStr: String,
+        jsonBody: String,
+        bearerToken: String?
+    ): Boolean {
+        var conn: HttpURLConnection? = null
+        return try {
+            val effectiveMethod = if (method == "PATCH") "POST" else method
+            conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                requestMethod = effectiveMethod
+                if (method == "PATCH") {
+                    setRequestProperty("X-HTTP-Method-Override", "PATCH")
+                }
+                doOutput = true
+                connectTimeout = 9000
+                readTimeout = 9000
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                if (!bearerToken.isNullOrBlank()) {
+                    setRequestProperty("Authorization", "Bearer $bearerToken")
+                }
+            }
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(jsonBody) }
+            conn.responseCode in 200..299
+        } catch (_: Exception) {
+            false
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
     private fun postSystemNotification(context: Context, title: String, body: String) {
         try {
             val appCtx = context.applicationContext

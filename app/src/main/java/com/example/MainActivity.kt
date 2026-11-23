@@ -184,7 +184,7 @@ open class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        AlOstaLocationManager.stopTracking(this)
+        AlOstaLocationManager.pauseIfIdle(this)
         WorkerStepTracker.flushPendingDiskWrite(this)
         super.onDestroy()
     }
@@ -641,17 +641,33 @@ class AndroidAppBridge(
 
     @SuppressLint("MissingPermission")
     @JavascriptInterface
-    fun getNativeLocation(): String {
-        return AlOstaLocationManager.getBestLocationJson(context)
+    fun getNativeLocation(): String = AlOstaLocationManager.getBestLocationJson(context)
+
+    @JavascriptInterface
+    fun startSiteLocationLock() { runCatching { AlOstaLocationManager.startPrecisionSiteLock(context) } }
+
+    @JavascriptInterface
+    fun getSiteLocationLockJson(): String = runCatching { AlOstaLocationManager.getPrecisionSiteLockJson(context) }.getOrDefault("")
+
+    @JavascriptInterface
+    fun stopSiteLocationLock() { runCatching { AlOstaLocationManager.stopPrecisionSiteLock(context) } }
+
+    @JavascriptInterface
+    fun setGpsTrackingActive(enabled: Boolean) { runCatching { AlOstaLocationManager.setShiftTracking(context, enabled) } }
+
+    @JavascriptInterface
+    fun setShiftGeofenceConfig(jsonConfig: String?) {
+        if (isTrustedCallerOrigin()) runCatching { WorkerGeofenceMonitor.configureFromJson(context, jsonConfig) }
     }
 
     @JavascriptInterface
-    fun setGpsTrackingActive(enabled: Boolean) {
-        try {
-            AlOstaLocationManager.setShiftTracking(context, enabled)
-        } catch (_: Exception) {
-        }
+    fun markLeftSiteAlertSent(attendanceId: String?) {
+        if (isTrustedCallerOrigin() && !attendanceId.isNullOrBlank()) runCatching { WorkerGeofenceMonitor.markAlertSentFromJs(context, attendanceId) }
     }
+
+    @JavascriptInterface
+    fun wasLeftSiteAlertSent(attendanceId: String?): Boolean =
+        isTrustedCallerOrigin() && !attendanceId.isNullOrBlank() && runCatching { WorkerGeofenceMonitor.wasAlertRecentlySent(context, attendanceId) }.getOrDefault(false)
 
     @JavascriptInterface
     fun setStepTrackingState(enabled: Boolean, workerId: String) {
@@ -882,10 +898,10 @@ fun AlOstaAppScreen(
         }
     }
 
-    // Battery-friendly GPS: stopped when screen disposes; active ONLY on-demand or during a worker's active shift
+    // Battery-friendly GPS: paused when idle on dispose; kept alive ONLY during an active shift
     DisposableEffect(context) {
         onDispose {
-            AlOstaLocationManager.stopTracking(context)
+            AlOstaLocationManager.pauseIfIdle(context)
         }
     }
 

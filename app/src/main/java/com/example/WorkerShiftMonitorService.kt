@@ -34,6 +34,8 @@ class WorkerShiftMonitorService : Service() {
             try {
                 WorkerStepTracker.ensureRegisteredIfTracking(applicationContext)
                 WorkerStepTracker.flushPendingDiskWrite(applicationContext)
+                AlOstaLocationManager.ensureShiftTrackingIfActive(applicationContext)
+                WorkerGeofenceMonitor.checkLatestLocation(applicationContext)
                 val manager = getSystemService(NotificationManager::class.java)
                 manager?.notify(NOTIFICATION_ID, buildShiftNotification())
             } catch (_: Exception) {
@@ -77,6 +79,8 @@ class WorkerShiftMonitorService : Service() {
         }
 
         WorkerStepTracker.ensureRegisteredIfTracking(applicationContext)
+        AlOstaLocationManager.ensureShiftTrackingIfActive(applicationContext)
+        WorkerGeofenceMonitor.checkLatestLocation(applicationContext)
         mainHandler.removeCallbacks(periodicRefreshRunnable)
         mainHandler.postDelayed(periodicRefreshRunnable, REFRESH_INTERVAL_MS)
         return START_STICKY
@@ -99,6 +103,8 @@ class WorkerShiftMonitorService : Service() {
         currentWorkerId = ""
         mainHandler.removeCallbacks(periodicRefreshRunnable)
         WorkerStepTracker.flushPendingDiskWrite(applicationContext)
+        WorkerGeofenceMonitor.clearConfig(applicationContext)
+        AlOstaLocationManager.setShiftTracking(applicationContext, false)
         try {
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         } catch (_: Exception) {
@@ -110,11 +116,12 @@ class WorkerShiftMonitorService : Service() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             return 0
         }
+        var combinedType = 0
         val hasActivityRecognition =
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) ==
                 PackageManager.PERMISSION_GRANTED
         if (hasActivityRecognition) {
-            return ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH
+            combinedType = combinedType or ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH
         }
         val hasFine =
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
@@ -123,9 +130,9 @@ class WorkerShiftMonitorService : Service() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
                 PackageManager.PERMISSION_GRANTED
         if (hasFine || hasCoarse) {
-            return ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            combinedType = combinedType or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
         }
-        return ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        return if (combinedType != 0) combinedType else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
     }
 
     private fun ensureNotificationChannel() {
@@ -172,7 +179,7 @@ class WorkerShiftMonitorService : Service() {
     companion object {
         private const val CHANNEL_ID = "al_osta_shift_monitor"
         private const val NOTIFICATION_ID = 4102
-        private const val REFRESH_INTERVAL_MS = 60_000L
+        private const val REFRESH_INTERVAL_MS = 30_000L
         const val ACTION_START_SHIFT = "com.example.action.START_SHIFT_MONITOR"
         const val ACTION_STOP_SHIFT = "com.example.action.STOP_SHIFT_MONITOR"
         const val EXTRA_WORKER_ID = "extra_worker_id"

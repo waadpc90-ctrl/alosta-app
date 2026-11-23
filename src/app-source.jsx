@@ -3,7 +3,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.22";
+        const APP_VERSION = "1.0.23";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -3869,14 +3869,17 @@
                     const raw = window.AndroidApp.getNativeLocation();
                     if (raw) {
                         const parsed = JSON.parse(raw);
-                        if (parsed && typeof parsed.lat === 'number' && typeof parsed.lng === 'number') {
+                        if (parsed && typeof parsed.lat === 'number' && typeof parsed.lng === 'number' && isFinite(parsed.lat) && isFinite(parsed.lng) && !(parsed.lat === 0 && parsed.lng === 0)) {
+                            const rawAcc = parsed.accuracy !== undefined ? Number(parsed.accuracy) : (parsed.acc !== undefined ? Number(parsed.acc) : 999);
+                            const rawTs = parsed.timestamp !== undefined ? Number(parsed.timestamp) : (parsed.time !== undefined ? Number(parsed.time) : 0);
                             return {
                                 coords: {
                                     latitude: parsed.lat,
                                     longitude: parsed.lng,
-                                    accuracy: parsed.acc || 15
+                                    accuracy: (isFinite(rawAcc) && rawAcc > 0) ? rawAcc : 999
                                 },
-                                timestamp: parsed.time || Date.now()
+                                timestamp: (isFinite(rawTs) && rawTs > 0) ? rawTs : 0,
+                                provider: parsed.provider || ''
                             };
                         }
                     }
@@ -3885,8 +3888,176 @@
             return null;
         };
 
+        const computeWeightedGpsCentroid = (samples = []) => {
+            const valid = samples.filter(s => s && isFinite(s.lat) && isFinite(s.lng) && !(s.lat === 0 && s.lng === 0) && isFinite(s.acc) && s.acc > 0 && s.acc <= 1000);
+            if (!valid.length) return null;
+            const bestAcc = Math.min(...valid.map(s => s.acc));
+            const accCeiling = Math.max(30, bestAcc * 2.4);
+            const accPool = valid.filter(s => s.acc <= accCeiling);
+            const pool = accPool.length ? accPool : valid;
+
+            let cluster = pool;
+            if (pool.length >= 3) {
+                const sortedLats = pool.map(s => s.lat).sort((a, b) => a - b);
+                const sortedLngs = pool.map(s => s.lng).sort((a, b) => a - b);
+                const medLat = sortedLats[Math.floor(sortedLats.length / 2)];
+                const medLng = sortedLngs[Math.floor(sortedLngs.length / 2)];
+                const dists = pool.map(s => calcDistance(s.lat, s.lng, medLat, medLng));
+                const sortedDists = [...dists].sort((a, b) => a - b);
+                const medDist = sortedDists[Math.floor(sortedDists.length / 2)];
+                const maxAllowed = Math.max(25, Math.round(medDist * 2.5));
+                const tight = pool.filter((_, i) => dists[i] <= maxAllowed);
+                if (tight.length) cluster = tight;
+            }
+
+            let sumW = 0, sumLat = 0, sumLng = 0, latestTs = 0;
+            cluster.forEach(s => {
+                const sigma = Math.max(3, s.acc);
+                const w = 1 / (sigma * sigma);
+                sumW += w;
+                sumLat += s.lat * w;
+                sumLng += s.lng * w;
+                if ((s.ts || 0) > latestTs) latestTs = s.ts;
+            });
+            const lat = sumLat / sumW;
+            const lng = sumLng / sumW;
+            const spread = Math.max(...cluster.map(s => calcDistance(s.lat, s.lng, lat, lng)));
+            const minAcc = Math.min(...cluster.map(s => s.acc));
+            const effectiveAcc = Math.round(Math.min(minAcc, Math.max(3, minAcc * (cluster.length >= 3 ? 0.85 : 1))));
+            const locked = (cluster.length >= 3 && effectiveAcc <= 22 && spread <= 22) || (cluster.length >= 2 && effectiveAcc <= 12 && spread <= 12);
+            return {
+                coords: { latitude: lat, longitude: lng, accuracy: effectiveAcc },
+                timestamp: latestTs || Date.now(),
+                sampleCount: cluster.length,
+                spreadMeters: spread,
+                locked
+            };
+        };
+
+        const captureStabilizedSiteLocation = (onProgress = null, maxWaitMs = 7500) => new Promise((resolve, reject) => {
+            const startMs = Date.now();
+            const samples = [];
+            let settled = false;
+            let watchId = null;
+            let nativePollTimer = null;
+            let hardTimer = null;
+            const hasNativeLock = Boolean(window.AndroidApp && typeof window.AndroidApp.startSiteLocationLock === 'function' && typeof window.AndroidApp.getSiteLocationLockJson === 'function');
+
+            const cleanup = () => {
+                if (watchId !== null && navigator.geolocation) {
+                    try { navigator.geolocation.clearWatch(watchId); } catch (e) {}
+                    watchId = null;
+                }
+                if (nativePollTimer) { clearInterval(nativePollTimer); nativePollTimer = null; }
+                if (hardTimer) { clearTimeout(hardTimer); hardTimer = null; }
+                if (hasNativeLock && typeof window.AndroidApp.stopSiteLocationLock === 'function') {
+                    try { window.AndroidApp.stopSiteLocationLock(); } catch (e) {}
+                }
+            };
+
+            const finalize = () => {
+                if (settled) return;
+                let nativeResult = null;
+                if (hasNativeLock) {
+                    try {
+                        const raw = window.AndroidApp.getSiteLocationLockJson();
+                        if (raw) {
+                            const parsed = JSON.parse(raw);
+                            if (parsed && parsed.hasFix && isFinite(parsed.lat) && isFinite(parsed.lng)) {
+                                nativeResult = {
+                                    coords: { latitude: parsed.lat, longitude: parsed.lng, accuracy: Math.round(parsed.accuracy || parsed.acc || 25) },
+                                    timestamp: parsed.timestamp || Date.now(),
+                                    sampleCount: parsed.sampleCount || 1,
+                                    spreadMeters: parsed.spreadMeters || 0,
+                                    locked: Boolean(parsed.locked)
+                                };
+                            }
+                        }
+                    } catch (e) {}
+                }
+                const webResult = computeWeightedGpsCentroid(samples);
+                let best = null;
+                if (nativeResult && webResult) {
+                    best = (nativeResult.locked && !webResult.locked) || (nativeResult.coords.accuracy <= webResult.coords.accuracy)
+                        ? nativeResult
+                        : webResult;
+                } else {
+                    best = nativeResult || webResult;
+                }
+                if (!best) {
+                    const fallback = getNativeGpsFix();
+                    if (fallback && fallback.timestamp > 0 && (Date.now() - fallback.timestamp) < 120000) {
+                        best = { ...fallback, sampleCount: 1, spreadMeters: 0, locked: false };
+                    }
+                }
+                settled = true;
+                cleanup();
+                if (best) resolve(best);
+                else reject(new Error('GPS Timeout'));
+            };
+
+            const reportProgress = () => {
+                if (settled || typeof onProgress !== 'function') return;
+                const webRes = computeWeightedGpsCentroid(samples);
+                let acc = webRes?.coords?.accuracy || null;
+                let count = webRes?.sampleCount || samples.length;
+                let locked = Boolean(webRes?.locked);
+                if (hasNativeLock) {
+                    try {
+                        const raw = window.AndroidApp.getSiteLocationLockJson();
+                        if (raw) {
+                            const parsed = JSON.parse(raw);
+                            if (parsed && parsed.hasFix) {
+                                const nAcc = Math.round(parsed.accuracy || parsed.acc || 999);
+                                if (acc === null || nAcc <= acc) {
+                                    acc = nAcc;
+                                    count = Math.max(count, parsed.sampleCount || 1);
+                                }
+                                if (parsed.locked) locked = true;
+                            }
+                        }
+                    } catch (e) {}
+                }
+                onProgress({ accuracy: acc, sampleCount: count, locked, elapsedMs: Date.now() - startMs });
+                if (locked && (Date.now() - startMs) >= 1800) {
+                    finalize();
+                }
+            };
+
+            if (hasNativeLock) {
+                try { window.AndroidApp.startSiteLocationLock(); } catch (e) {}
+                nativePollTimer = setInterval(reportProgress, 650);
+            }
+
+            if (navigator.geolocation && navigator.geolocation.watchPosition) {
+                try {
+                    watchId = navigator.geolocation.watchPosition(
+                        (pos) => {
+                            if (settled || !pos?.coords) return;
+                            const ts = pos.timestamp || Date.now();
+                            const acc = Number(pos.coords.accuracy || 999);
+                            if (ts < (startMs - 8000) && samples.length > 0) return;
+                            if (acc > 250 && samples.length > 0) return;
+                            samples.push({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc, ts });
+                            reportProgress();
+                        },
+                        () => {},
+                        { enableHighAccuracy: true, maximumAge: 0, timeout: maxWaitMs }
+                    );
+                } catch (e) {}
+            } else if (!hasNativeLock) {
+                settled = true;
+                reject(new Error('GPS Not Supported'));
+                return;
+            }
+
+            hardTimer = setTimeout(finalize, maxWaitMs);
+        });
+
         const requestGeolocation = (options = {}) => new Promise((resolve, reject) => {
             let settled = false;
+            const maxAgeMs = typeof options.maximumAge === 'number' ? options.maximumAge : 10000;
+            const forceFresh = options.forceFresh === true || maxAgeMs === 0;
             const finishResolve = (pos) => {
                 if (!settled) {
                     settled = true;
@@ -3896,7 +4067,8 @@
             const finishReject = (err) => {
                 if (!settled) {
                     const fallback = getNativeGpsFix();
-                    if (fallback) {
+                    const isUsableFallback = fallback && fallback.timestamp > 0 && (Date.now() - fallback.timestamp) < 90000 && fallback.coords.accuracy <= 250;
+                    if (isUsableFallback) {
                         settled = true;
                         resolve(fallback);
                     } else {
@@ -3907,27 +4079,35 @@
             };
 
             const nativeFix = getNativeGpsFix();
-            if (nativeFix && (Date.now() - nativeFix.timestamp < 25000) && (nativeFix.coords.accuracy <= 65)) {
+            const nativeAgeMs = (nativeFix && nativeFix.timestamp > 0) ? (Date.now() - nativeFix.timestamp) : Infinity;
+            const allowedNativeAge = forceFresh ? 4000 : Math.min(Math.max(maxAgeMs, 5000), 20000);
+            const allowedNativeAcc = forceFresh ? 25 : 50;
+            if (nativeFix && nativeAgeMs >= 0 && nativeAgeMs <= allowedNativeAge && nativeFix.coords.accuracy <= allowedNativeAcc) {
                 finishResolve(nativeFix);
                 return;
             }
 
             if (!navigator.geolocation) {
-                if (nativeFix) finishResolve(nativeFix);
+                if (nativeFix && nativeAgeMs < 90000) finishResolve(nativeFix);
                 else finishReject(new Error('GPS Not Supported'));
                 return;
             }
 
             const timer = setTimeout(() => {
                 const retryNative = getNativeGpsFix();
-                if (retryNative) finishResolve(retryNative);
-            }, 4000);
+                const retryAge = (retryNative && retryNative.timestamp > 0) ? (Date.now() - retryNative.timestamp) : Infinity;
+                if (retryNative && retryAge <= (forceFresh ? 12000 : 35000) && retryNative.coords.accuracy <= 80) {
+                    finishResolve(retryNative);
+                }
+            }, forceFresh ? 5500 : 4000);
 
             navigator.geolocation.getCurrentPosition(
                 (pos) => {
                     clearTimeout(timer);
                     const latestNative = getNativeGpsFix();
-                    if (latestNative && latestNative.coords.accuracy < (pos.coords.accuracy || 100)) {
+                    const latestAge = (latestNative && latestNative.timestamp > 0) ? (Date.now() - latestNative.timestamp) : Infinity;
+                    const posAcc = Number(pos?.coords?.accuracy || 100);
+                    if (latestNative && latestAge <= 15000 && latestNative.coords.accuracy < posAcc) {
                         finishResolve(latestNative);
                     } else {
                         finishResolve(pos);
@@ -3937,7 +4117,7 @@
                     clearTimeout(timer);
                     finishReject(err);
                 },
-                { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000, ...options }
+                { enableHighAccuracy: true, timeout: 10000, maximumAge: forceFresh ? 0 : 5000, ...options }
             );
         });
 
@@ -4509,6 +4689,8 @@
             const [projRadius, setProjRadius] = useState(150);
             const [tempWorkers, setTempWorkers] = useState([]);
             const [gpsLoading, setGpsLoading] = useState(false);
+            const [gpsLockStatus, setGpsLockStatus] = useState(null);
+            const gpsCaptureRunRef = useRef(0);
             const [ratingData, setRatingData] = useState({ punctuality: 0, quality: 0 });
             const [showSettled, setShowSettled] = useState(false);
             const [speedDialOpen, setSpeedDialOpen] = useState(false);
@@ -6487,14 +6669,52 @@
             };
 
             const captureCurrentLocation = () => {
+                if (gpsLoading) return;
+                haptic();
+                const runId = ++gpsCaptureRunRef.current;
                 setGpsLoading(true);
-                requestGeolocation().then(pos => {
-                    const { latitude, longitude } = pos.coords;
+                setGpsLockStatus({ state: 'locking', accuracy: null, sampleCount: 0 });
+                captureStabilizedSiteLocation((progress) => {
+                    if (gpsCaptureRunRef.current !== runId) return;
+                    setGpsLockStatus({
+                        state: 'locking',
+                        accuracy: progress.accuracy,
+                        sampleCount: progress.sampleCount || 0
+                    });
+                }, 7500).then(pos => {
+                    if (gpsCaptureRunRef.current !== runId) return;
+                    const { latitude, longitude, accuracy } = pos.coords;
+                    const roundedAcc = Math.round(accuracy || 0);
                     const raw = `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
                     setLocStr(raw);
-                    setLocData({ lat: latitude, lng: longitude, raw });
-                    addToast(lang === 'ar' ? 'تم تحديد الموقع الجغرافي ✓' : 'Location Captured ✓');
-                }).catch(err => addToast('GPS: ' + err.message)).finally(() => setGpsLoading(false));
+                    setLocData({
+                        lat: latitude,
+                        lng: longitude,
+                        raw,
+                        accuracy: roundedAcc,
+                        lockedAt: Date.now()
+                    });
+                    setGpsLockStatus({
+                        state: roundedAcc > 45 ? 'weak' : 'locked',
+                        accuracy: roundedAcc,
+                        sampleCount: pos.sampleCount || 1
+                    });
+                    if (roundedAcc > 45) {
+                        addToast(lang === 'ar'
+                            ? `تم التقاط الموقع (دقة ±${roundedAcc}م) — يُفضّل التحديث بالخارج أو قرب نافذة لتثبيت أدق`
+                            : `Location captured (±${roundedAcc}m) — move outdoors for tighter lock`);
+                    } else {
+                        addToast(lang === 'ar'
+                            ? `تم تثبيت الموقع الجغرافي بدقة ±${roundedAcc || 10}م ✓`
+                            : `Site GPS Locked (±${roundedAcc || 10}m) ✓`);
+                    }
+                }).catch(err => {
+                    if (gpsCaptureRunRef.current !== runId) return;
+                    setGpsLockStatus(null);
+                    addToast(lang === 'ar' ? 'تعذر تثبيت GPS — تأكد من تفعيل الموقع بالهاتف وحاول مجدداً' : ('GPS: ' + err.message));
+                }).finally(() => {
+                    if (gpsCaptureRunRef.current === runId) setGpsLoading(false);
+                });
             };
 
             const deleteTransaction = (id, collection) => {
@@ -10202,13 +10422,24 @@
                                             <Icon name="clipboard-list" size={14} />
                                             <span>{lang === 'ar' ? 'لصق' : 'Paste'}</span>
                                         </button>
-                                        <button type="button" onClick={captureCurrentLocation} disabled={gpsLoading} className="px-3 py-2 bg-indigo-600 text-white rounded-xl font-bold text-[11px] flex items-center justify-center gap-1 btn-press">
-                                            <Icon name="crosshair" size={14} />
-                                            <span>{gpsLoading ? '...' : tr('locate')}</span>
+                                        <button type="button" onClick={captureCurrentLocation} disabled={gpsLoading} className="px-3 py-2 bg-indigo-600 text-white rounded-xl font-bold text-[11px] flex items-center justify-center gap-1 btn-press disabled:opacity-70">
+                                            <Icon name="crosshair" size={14} className={gpsLoading ? 'animate-spin' : ''} />
+                                            <span>{gpsLoading ? (lang === 'ar' ? 'تثبيت...' : 'Locking...') : tr('locate')}</span>
                                         </button>
                                     </div>
                                 </div>
-                                {locData && <p className="text-[10px] text-emerald-600 font-bold">{tr('locFound')} ({locData.lat.toFixed(5)}, {locData.lng.toFixed(5)})</p>}
+                                {gpsLoading && gpsLockStatus?.state === 'locking' && (
+                                    <p className="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold flex items-center gap-1">
+                                        <span>📡 {lang === 'ar' ? 'جاري تثبيت GPS بدقة عالية...' : 'Stabilizing GPS lock...'}</span>
+                                        {gpsLockStatus.accuracy ? <span className="font-mono">(±{gpsLockStatus.accuracy}{lang === 'ar' ? 'م' : 'm'})</span> : null}
+                                    </p>
+                                )}
+                                {locData && (
+                                    <p className={`text-[10px] font-bold ${locData.accuracy > 45 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                                        {tr('locFound')} ({locData.lat.toFixed(5)}, {locData.lng.toFixed(5)})
+                                        {locData.accuracy ? ` • ${lang === 'ar' ? `دقة ±${locData.accuracy}م` : `±${locData.accuracy}m`}` : ''}
+                                    </p>
+                                )}
                                 <div className="flex items-center justify-between pt-1">
                                     <span className="text-[11px] font-bold text-slate-500">{lang === 'ar' ? 'نطاق التطابق المسموح:' : 'Allowed Site Radius:'}</span>
                                     <select value={projRadius} onChange={e => setProjRadius(Number(e.target.value))} className="bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-xl px-2.5 py-1 text-xs font-black text-indigo-600 dark:text-indigo-400 outline-none">
@@ -10272,13 +10503,24 @@
                                             <Icon name="clipboard-list" size={14} />
                                             <span>{lang === 'ar' ? 'لصق' : 'Paste'}</span>
                                         </button>
-                                        <button type="button" onClick={captureCurrentLocation} disabled={gpsLoading} className="px-3 py-2 bg-indigo-600 text-white rounded-xl font-bold text-[11px] flex items-center justify-center gap-1 btn-press">
-                                            <Icon name="crosshair" size={14} />
-                                            <span>{tr('update')}</span>
+                                        <button type="button" onClick={captureCurrentLocation} disabled={gpsLoading} className="px-3 py-2 bg-indigo-600 text-white rounded-xl font-bold text-[11px] flex items-center justify-center gap-1 btn-press disabled:opacity-70">
+                                            <Icon name="crosshair" size={14} className={gpsLoading ? 'animate-spin' : ''} />
+                                            <span>{gpsLoading ? (lang === 'ar' ? 'تثبيت...' : 'Locking...') : tr('update')}</span>
                                         </button>
                                     </div>
                                 </div>
-                                {locData && <p className="text-[10px] text-emerald-600 font-bold">{tr('locFound')} ({locData.lat.toFixed(5)}, {locData.lng.toFixed(5)})</p>}
+                                {gpsLoading && gpsLockStatus?.state === 'locking' && (
+                                    <p className="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold flex items-center gap-1">
+                                        <span>📡 {lang === 'ar' ? 'جاري تثبيت GPS بدقة عالية...' : 'Stabilizing GPS lock...'}</span>
+                                        {gpsLockStatus.accuracy ? <span className="font-mono">(±{gpsLockStatus.accuracy}{lang === 'ar' ? 'م' : 'm'})</span> : null}
+                                    </p>
+                                )}
+                                {locData && (
+                                    <p className={`text-[10px] font-bold ${locData.accuracy > 45 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                                        {tr('locFound')} ({locData.lat.toFixed(5)}, {locData.lng.toFixed(5)})
+                                        {locData.accuracy ? ` • ${lang === 'ar' ? `دقة ±${locData.accuracy}م` : `±${locData.accuracy}m`}` : ''}
+                                    </p>
+                                )}
                                 <div className="flex items-center justify-between pt-1">
                                     <span className="text-[11px] font-bold text-slate-500">{lang === 'ar' ? 'نطاق التطابق المسموح:' : 'Allowed Site Radius:'}</span>
                                     <select value={projRadius} onChange={e => setProjRadius(Number(e.target.value))} className="bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-xl px-2.5 py-1 text-xs font-black text-indigo-600 dark:text-indigo-400 outline-none">
@@ -12167,6 +12409,9 @@
             const [leftSiteWarning, setLeftSiteWarning] = useState(null);
             const [shiftElapsedStr, setShiftElapsedStr] = useState('00:00:00');
             const outOfBoundsAlertSentRef = useRef({});
+            const outOfBoundsInFlightRef = useRef({});
+            const outOfBoundsStreakRef = useRef({ count: 0, lastAt: 0 });
+            const insideSiteSinceRef = useRef(0);
             const lastSyncedStepsRef = useRef(0);
             const lastSyncedActiveMinRef = useRef(0);
             const lastSyncedInBoundsRef = useRef(null);
@@ -12290,50 +12535,102 @@
                 }
                 const rawDist = calcDistance(coords.lat, coords.lng, activeSiteCoords.lat, activeSiteCoords.lng);
                 const effectiveDist = calcEffectiveDistance(coords.lat, coords.lng, activeSiteCoords.lat, activeSiteCoords.lng, coords.acc);
+                const nowMs = Date.now();
+
+                // Ignore extremely coarse cell-tower jumps (>90m accuracy) unless undeniably far outside
+                if (triggerAlertIfOut && coords.acc > 90 && (rawDist - coords.acc) <= (allowedRadius + 120)) {
+                    return { coords, rawDist, effectiveDist, inBounds: true, ignoredLowAccuracy: true };
+                }
+
                 const inBounds = effectiveDist <= allowedRadius;
-                setLiveGps({ coords, rawDist, effectiveDist, inBounds, error: null, updatedAt: Date.now() });
+                setLiveGps({ coords, rawDist, effectiveDist, inBounds, error: null, updatedAt: nowMs });
 
                 if (inBounds) {
+                    outOfBoundsStreakRef.current = { count: 0, lastAt: 0 };
                     setLeftSiteWarning(null);
+                    if (insideSiteSinceRef.current === 0) {
+                        insideSiteSinceRef.current = nowMs;
+                    } else if (tA?.id && (nowMs - insideSiteSinceRef.current) >= 120000) {
+                        const alertKey = `${tA.id}_${todayStr()}`;
+                        delete outOfBoundsAlertSentRef.current[alertKey];
+                    }
                 } else if (triggerAlertIfOut && tA && tA.timeIn && !tA.timeOut) {
+                    insideSiteSinceRef.current = 0;
+                    const streak = outOfBoundsStreakRef.current;
+                    const hasTimeGap = streak.lastAt > 0 && (nowMs - streak.lastAt) >= 5000;
+                    if (streak.count === 0) {
+                        outOfBoundsStreakRef.current = { count: 1, lastAt: nowMs };
+                    } else if (hasTimeGap) {
+                        outOfBoundsStreakRef.current = { count: streak.count + 1, lastAt: nowMs };
+                    }
+
+                    const highConfidenceFarExit = coords.acc <= 35 && effectiveDist > (allowedRadius + 80);
+                    const confirmedDeparture = highConfidenceFarExit || (streak.count >= 1 && hasTimeGap);
+
+                    if (!confirmedDeparture) {
+                        return { coords, rawDist, effectiveDist, inBounds: false, pendingConfirmation: true };
+                    }
+
                     const alertKey = `${tA.id}_${todayStr()}`;
                     setLeftSiteWarning({
                         dist: rawDist,
                         projectTitle: activeProject?.title || '',
-                        time: Date.now()
+                        time: nowMs
                     });
-                    if (!outOfBoundsAlertSentRef.current[alertKey]) {
-                        outOfBoundsAlertSentRef.current[alertKey] = true;
-                        const warnTitle = lang === 'ar' ? '⚠️ تنبيه: ابتعدت عن موقع العمل!' : '⚠️ Alert: Left Work Site!';
-                        const warnBody = lang === 'ar'
-                            ? `أنت الآن على بعد ${rawDist} متر عن "${activeProject?.title || 'موقع العمل'}". تم إشعار المقاول.`
-                            : `You are ${rawDist}m away from "${activeProject?.title || 'Work Site'}". Contractor notified.`;
-                        triggerNativeNotification(warnTitle, warnBody);
-                        addToast(warnBody);
 
+                    const lastSentTs = Number(outOfBoundsAlertSentRef.current[alertKey] || 0);
+                    const recentlySentJs = lastSentTs > 0 && (nowMs - lastSentTs) < (15 * 60 * 1000);
+                    let recentlySentNative = false;
+                    try {
+                        if (window.AndroidApp && typeof window.AndroidApp.wasLeftSiteAlertSent === 'function') {
+                            recentlySentNative = Boolean(window.AndroidApp.wasLeftSiteAlertSent(tA.id));
+                        }
+                    } catch (e) {}
+
+                    if (!recentlySentJs && !recentlySentNative && !outOfBoundsInFlightRef.current[alertKey]) {
+                        outOfBoundsInFlightRef.current[alertKey] = true;
+                        const targetAdminId = String(activeProject?.adminId || lW.adminId || worker?.adminId || '').trim();
                         try {
-                            await sendContractorNotification(db, {
+                            const sentDocId = await sendContractorNotification(db, {
                                 date: todayStr(),
                                 workerId: lW.id,
                                 workerName: lW.name,
-                                adminId: activeProject?.adminId || lW.adminId || worker?.adminId || '',
+                                adminId: targetAdminId,
                                 projectId: activeProject?.id || null,
                                 projectTitle: activeProject?.title || '',
                                 timeIn: tA.timeIn,
-                                timeOut: Date.now(),
+                                timeOut: nowMs,
                                 inLoc: coords,
                                 outLoc: coords,
                                 inStatus: 'invalid',
                                 inDist: rawDist,
                                 type: 'left_site'
                             });
+                            if (sentDocId) {
+                                // Mark sent ONLY AFTER Firestore confirms delivery (retries automatically on Wi-Fi->4G drops)
+                                outOfBoundsAlertSentRef.current[alertKey] = nowMs;
+                                try {
+                                    if (window.AndroidApp && typeof window.AndroidApp.markLeftSiteAlertSent === 'function') {
+                                        window.AndroidApp.markLeftSiteAlertSent(tA.id);
+                                    }
+                                } catch (e) {}
+                                const warnTitle = lang === 'ar' ? '⚠️ تنبيه: ابتعدت عن موقع العمل!' : '⚠️ Alert: Left Work Site!';
+                                const warnBody = lang === 'ar'
+                                    ? `أنت الآن على بعد ${rawDist} متر عن "${activeProject?.title || 'موقع العمل'}". تم إشعار المقاول.`
+                                    : `You are ${rawDist}m away from "${activeProject?.title || 'Work Site'}". Contractor notified.`;
+                                triggerNativeNotification(warnTitle, warnBody);
+                                addToast(warnBody);
+                            }
                             await db.collection('attendance').doc(tA.id).update({
                                 outLoc: coords,
                                 outDist: rawDist,
                                 outStatus: 'invalid',
-                                leftSiteAt: Date.now()
-                            });
-                        } catch (e) { }
+                                leftSiteAt: nowMs
+                            }).catch(() => {});
+                        } catch (e) {
+                        } finally {
+                            outOfBoundsInFlightRef.current[alertKey] = false;
+                        }
                     }
                 }
                 return { coords, rawDist, effectiveDist, inBounds };
@@ -12342,7 +12639,7 @@
             const refreshLiveLocation = async () => {
                 setGpsLoading(true);
                 try {
-                    const pos = await requestGeolocation();
+                    const pos = await requestGeolocation({ enableHighAccuracy: true, maximumAge: 0, forceFresh: true, timeout: 10000 });
                     await evaluateWorkerPosition(pos, true);
                 } catch (err) {
                     setLiveGps(p => ({ ...p, error: err.message || 'GPS Error', updatedAt: Date.now() }));
@@ -12362,19 +12659,47 @@
                 } catch (e) {}
                 return () => {
                     try {
-                        if (window.AndroidApp && typeof window.AndroidApp.setGpsTrackingActive === 'function') {
+                        if (!isWorkerShiftRunning && window.AndroidApp && typeof window.AndroidApp.setGpsTrackingActive === 'function') {
                             window.AndroidApp.setGpsTrackingActive(false);
                         }
                     } catch (e) {}
                 };
             }, [isWorkerShiftRunning]);
 
+            // Sync active shift geofence parameters to native Android service so exit alerts fire even with screen off
+            useEffect(() => {
+                try {
+                    if (!window.AndroidApp || typeof window.AndroidApp.setShiftGeofenceConfig !== 'function') return;
+                    const geofenceAdminId = String(activeProject?.adminId || lW.adminId || worker?.adminId || '').trim();
+                    if (isWorkerShiftRunning && tA?.id && activeSiteCoords && geofenceAdminId) {
+                        window.AndroidApp.setShiftGeofenceConfig(JSON.stringify({
+                            active: true,
+                            attendanceId: tA.id,
+                            workerId: lW.id,
+                            workerName: lW.name || '',
+                            adminId: geofenceAdminId,
+                            projectId: activeProject?.id || tA.projectId || '',
+                            projectTitle: activeProject?.title || '',
+                            siteLat: activeSiteCoords.lat,
+                            siteLng: activeSiteCoords.lng,
+                            radiusMeters: allowedRadius,
+                            timeIn: tA.timeIn || Date.now(),
+                            date: tA.date || todayStr(),
+                            fbProjectId: firebaseConfig.projectId || '',
+                            fbApiKey: firebaseConfig.apiKey || ''
+                        }));
+                    } else if (!workerSyncing) {
+                        window.AndroidApp.setShiftGeofenceConfig(JSON.stringify({ active: false }));
+                    }
+                } catch (e) {}
+            }, [isWorkerShiftRunning, workerSyncing, tA?.id, tA?.timeIn, tA?.date, tA?.projectId, activeProject?.id, activeProject?.title, activeProject?.adminId, activeSiteCoords?.lat, activeSiteCoords?.lng, allowedRadius, lW.id, lW.name, lW.adminId]);
+
             useEffect(() => {
                 let watchId = null;
                 let intervalId = null;
 
                 const pollGps = () => {
-                    requestGeolocation({ maximumAge: 5000, timeout: 8000 })
+                    requestGeolocation({ enableHighAccuracy: true, maximumAge: 0, forceFresh: isWorkerShiftRunning, timeout: 9000 })
                         .then(pos => evaluateWorkerPosition(pos, true))
                         .catch(() => { });
                 };
@@ -12383,13 +12708,13 @@
 
                 // Only keep continuous polling & watchPosition alive while the worker is clocked-in on shift
                 if (isWorkerShiftRunning) {
-                    intervalId = setInterval(pollGps, 15000);
+                    intervalId = setInterval(pollGps, 12000);
                     if (navigator.geolocation && navigator.geolocation.watchPosition) {
                         try {
                             watchId = navigator.geolocation.watchPosition(
                                 pos => evaluateWorkerPosition(pos, true),
                                 () => { },
-                                { enableHighAccuracy: true, maximumAge: 5000, timeout: 12000 }
+                                { enableHighAccuracy: true, maximumAge: 0, timeout: 12000 }
                             );
                         } catch (e) { }
                     }
@@ -12882,7 +13207,7 @@
                 try {
                     let coords = null, status = 'valid', distance = null;
                     try {
-                        const pos = await requestGeolocation();
+                        const pos = await requestGeolocation({ enableHighAccuracy: true, maximumAge: 0, forceFresh: true, timeout: 10000 });
                         const evalRes = await evaluateWorkerPosition(pos, false);
                         coords = evalRes.coords;
                         if (activeSiteCoords) {
@@ -12893,6 +13218,11 @@
 
                     const m = readNativeStepMetrics(lW.id);
                     setNativeStepTracking(false, '');
+                    try {
+                        if (window.AndroidApp && typeof window.AndroidApp.setShiftGeofenceConfig === 'function') {
+                            window.AndroidApp.setShiftGeofenceConfig(JSON.stringify({ active: false }));
+                        }
+                    } catch (e) {}
                     const finalRawActiveMin = Math.max(m.activeMinutes || 0, parseInt(tA.activeMinutes) || 0);
                     const checkoutNowMs = Date.now();
                     const eff = getEffortInfo(

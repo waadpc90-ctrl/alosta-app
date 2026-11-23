@@ -160,5 +160,73 @@ class ExampleUnitTest {
         // Huge off-shift spike > 2500 -> rejected
         assertFalse(WorkerStepTracker.isPlausibleStepDelta(3000, 3_600_000L))
     }
+
+    @Test
+    fun locationManager_stabilizedCentroid_rejectsOutliersAndLocksTrueSite() {
+        val now = 1_700_000_000_000L
+        val samples = listOf(
+            // True site around 33.31520, 44.36610 (accurate GPS readings)
+            AlOstaLocationManager.LocationSample(33.31520, 44.36610, 8f, now, isGps = true),
+            AlOstaLocationManager.LocationSample(33.31522, 44.36612, 7f, now + 1000L, isGps = true),
+            AlOstaLocationManager.LocationSample(33.31519, 44.36609, 6f, now + 2000L, isGps = true),
+            // Wild coarse cell-tower jump 600m away
+            AlOstaLocationManager.LocationSample(33.32050, 44.37100, 350f, now + 2500L, isGps = false)
+        )
+        val fix = AlOstaLocationManager.computeStabilizedCentroid(samples)
+        assertTrue(fix != null)
+        assertTrue(fix!!.locked)
+        assertEquals(3, fix.sampleCount)
+        assertTrue(fix.accuracy <= 10f)
+        val driftFromTrueSite = WorkerGeofenceMonitor.calcDistanceMeters(fix.lat, fix.lng, 33.31520, 44.36610)
+        assertTrue("Expected locked centroid within 5m of true site, got ${driftFromTrueSite}m", driftFromTrueSite <= 5)
+    }
+
+    @Test
+    fun geofenceMonitor_antiGlitchAndConfirmedDepartureLogic() {
+        // 1) Coarse 200m cell-tower jump at 260m raw distance (radius 150m): ignored to prevent false alarm
+        val glitch = WorkerGeofenceMonitor.evaluateReading(
+            rawDistMeters = 260,
+            accuracyMeters = 200f,
+            radiusMeters = 150,
+            priorOutCount = 0,
+            hasTimeGap = false
+        )
+        assertTrue(glitch.ignoredLowAccuracy)
+        assertFalse(glitch.confirmedDeparture)
+
+        // 2) First moderate exit reading (210m, acc 15m -> eff 195m > 150m): out of bounds, awaits 2nd confirmation
+        val firstExit = WorkerGeofenceMonitor.evaluateReading(
+            rawDistMeters = 210,
+            accuracyMeters = 15f,
+            radiusMeters = 150,
+            priorOutCount = 0,
+            hasTimeGap = false
+        )
+        assertFalse(firstExit.inBounds)
+        assertFalse(firstExit.confirmedDeparture)
+
+        // 3) Second consecutive exit reading after time gap -> confirmed!
+        val secondExit = WorkerGeofenceMonitor.evaluateReading(
+            rawDistMeters = 225,
+            accuracyMeters = 15f,
+            radiusMeters = 150,
+            priorOutCount = 1,
+            hasTimeGap = true
+        )
+        assertFalse(secondExit.inBounds)
+        assertTrue(secondExit.confirmedDeparture)
+
+        // 4) High-confidence far exit (320m, acc 12m -> eff 308m > 150+80): confirmed immediately!
+        val farExit = WorkerGeofenceMonitor.evaluateReading(
+            rawDistMeters = 320,
+            accuracyMeters = 12f,
+            radiusMeters = 150,
+            priorOutCount = 0,
+            hasTimeGap = false
+        )
+        assertFalse(farExit.inBounds)
+        assertTrue(farExit.confirmedDeparture)
+    }
 }
+
 

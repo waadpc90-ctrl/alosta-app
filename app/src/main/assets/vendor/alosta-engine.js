@@ -1,4 +1,3 @@
-/* Al-Osta Modular Architecture Engine v1.0.22 */
 /**
  * Module 01: Al-Osta Enterprise Security, Auth UID Session Binding, Brute-Force Guard & Shared Config Bus
  * Solves: Client-side session tampering, refresh-bypass on login lockouts, duplicate app_config listeners.
@@ -165,7 +164,6 @@
 
     global.AlOstaAppConfigBus = createAppConfigBus();
 })(typeof window !== 'undefined' ? window : globalThis);
-
 /**
  * Module 03: Al-Osta Adaptive Image Compressor, Blob Decoupling (`blob://media_...`) & Lazy Resolver
  * Solves: Base64 payload bloat inside Firestore `store_products` / `stores` documents.
@@ -365,7 +363,6 @@
         getCachedMediaBlobSync
     });
 })(typeof window !== 'undefined' ? window : globalThis);
-
 /**
  * Module 02: Al-Osta High-Performance O(1) Indexed Financial Aggregator & Monthly Snapshot Archiver
  * Solves: O(N*M) frontend array scanning slowdown on large datasets (10,000+ records) and monthly ledger archiving.
@@ -659,7 +656,6 @@
         saveMonthlyArchiveSnapshot
     });
 })(typeof window !== 'undefined' ? window : this);
-
 /**
  * Module 04: Al-Osta Differential IndexedDB Vault, Sync Queue State Tracker & Financial Audit Logger
  * Solves: 5MB localStorage ceiling, full-DB JSON.stringify jank on every write, silent cloud drops, and audit trail.
@@ -904,7 +900,6 @@
         logEvent: logAuditEvent
     });
 })(typeof window !== 'undefined' ? window : globalThis);
-
 /**
  * Module 05: Al-Osta Precision Worker Activity, Trade-Calibrated Effort & 4-State Live Status Engine
  * Combines 4 signals: Shift state + Heartbeat freshness + GPS site geofence + Recent motion/step window.
