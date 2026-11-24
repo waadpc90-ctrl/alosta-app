@@ -1,5 +1,5 @@
         // =========================================================================
-        // AL-OSTA PLATFORM CENTRAL DASHBOARD (v1.0.23 — COMPLETE EDITION)
+        // AL-OSTA PLATFORM CENTRAL DASHBOARD (v1.0.24 — COMPLETE EDITION)
         // Full 5-Tab Cloud Administration Suite + StoreOwnerPortal:
         // 1. 👷 المقاولون (admins) — CRUD, Pro Plans, Projects/Workers Count, Password Reset, WhatsApp
         // 2. 🛠️ العمال والحرفيون (workers) — CRUD, Pro Verification, Login Codes, Wages, Ratings
@@ -17,7 +17,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.23";
+        const APP_VERSION = "1.0.24";
         const { useState, useEffect, useMemo, useRef } = React;
 
         const firebaseConfig = {
@@ -3437,7 +3437,7 @@
                 const cleanPortalUrl = String(appConfig.portalBaseUrl ?? '').trim() || 'https://waadpc90-ctrl.github.io/alosta-app/';
 
                 if (!cleanVersion) {
-                    setConfigSaveError('يرجى كتابة رقم الإصدار (مثال: 1.0.23) قبل الحفظ.');
+                    setConfigSaveError('يرجى كتابة رقم الإصدار (مثال: 1.0.24) قبل الحفظ.');
                     addToast('⚠️ يرجى كتابة رقم الإصدار قبل الحفظ', 'error');
                     return;
                 }
@@ -4918,7 +4918,7 @@
                                                     dir="ltr"
                                                     value={appConfig.latestVersion ?? ''}
                                                     onChange={(e) => updateAppConfigFields({ latestVersion: e.target.value })}
-                                                    placeholder="1.0.23"
+                                                    placeholder="1.0.24"
                                                     className="flex-1 p-3 rounded-2xl bg-slate-950 border border-slate-800 focus:border-amber-400 focus:outline-none text-sm font-mono font-black text-amber-300"
                                                 />
                                                 <button

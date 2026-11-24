@@ -264,6 +264,17 @@ object WorkerGeofenceMonitor {
         return lastId == attendanceId.trim() && (System.currentTimeMillis() - lastAt) < EPISODE_COOLDOWN_MS
     }
 
+    fun getLatestSiteBoundsSnapshot(context: Context): Pair<Boolean?, Int?> {
+        val appCtx = context.applicationContext
+        val cfg = loadConfig(appCtx) ?: return Pair(null, null)
+        val loc = AlOstaLocationManager.getLatestFreshLocation(appCtx) ?: return Pair(null, null)
+        if (loc.time > 0L && (System.currentTimeMillis() - loc.time) > 180_000L) return Pair(null, null)
+        val rawDist = calcDistanceMeters(loc.latitude, loc.longitude, cfg.siteLat, cfg.siteLng)
+        if (rawDist == Int.MAX_VALUE) return Pair(null, null)
+        val effDist = calcEffectiveDistanceMeters(rawDist, loc.accuracy)
+        return Pair(effDist <= cfg.radiusMeters, rawDist)
+    }
+
     fun checkLatestLocation(context: Context) {
         val appCtx = context.applicationContext
         if (!isShiftGeofenceActive(appCtx)) return

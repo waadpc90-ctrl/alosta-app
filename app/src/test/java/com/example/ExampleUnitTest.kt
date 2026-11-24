@@ -227,6 +227,102 @@ class ExampleUnitTest {
         assertFalse(farExit.inBounds)
         assertTrue(farExit.confirmedDeparture)
     }
+
+    @Test
+    fun telemetrySyncManager_tradeCalibrationCrewPatchUrlAndCadence() {
+        // 1) Stationary craft (جبس بورد) credits active work minutes fairly alongside steps
+        val gypsum = WorkerTelemetrySyncManager.computeTradeCalibratedMetrics(
+            steps = 1600,
+            activeMinutes = 160,
+            shiftElapsedMinutes = 240,
+            specialty = "جبس بورد"
+        )
+        assertEquals("stationary", gypsum.tradeType)
+        assertEquals(1184, gypsum.distanceMeters)
+        assertTrue("Expected gypsum effortScore >= 60, got ${gypsum.effortScore}", gypsum.effortScore >= 60)
+        assertTrue("Expected gypsum calories in 400..520, got ${gypsum.calories}", gypsum.calories in 400..520)
+
+        // 2) Active minutes are strictly capped to actual elapsed shift minutes
+        val capped = WorkerTelemetrySyncManager.computeTradeCalibratedMetrics(
+            steps = 500,
+            activeMinutes = 180,
+            shiftElapsedMinutes = 30,
+            specialty = "عامل بناء"
+        )
+        assertEquals("mobile", capped.tradeType)
+        assertEquals(30, capped.activeMinutes)
+
+        // 3) Crew board PATCH URL safely escapes worker IDs starting with digits or symbols so sibling workers are never overwritten
+        val patchUrl = WorkerTelemetrySyncManager.buildCrewBoardPatchUrl("alosta-prod", "admin_1", "545W8X")
+        assertTrue(patchUrl.contains("/worker_telemetry/crew_admin_1?"))
+        assertTrue(patchUrl.contains("updateMask.fieldPaths=adminId"))
+        assertTrue(patchUrl.contains("updateMask.fieldPaths=isCrewBoard"))
+        assertTrue(patchUrl.contains("updateMask.fieldPaths=updatedAt"))
+        assertTrue(patchUrl.contains("updateMask.fieldPaths=workers.%60545W8X%60"))
+
+        // 4) Sync cadence: immediate initial heartbeat, 90s on background activity, 4-min stationary heartbeat, quiet when foreground JS is active
+        assertTrue(
+            WorkerTelemetrySyncManager.shouldSyncTelemetry(
+                forceSync = false,
+                initialSyncDone = false,
+                isAppInForeground = false,
+                stepDelta = 0,
+                activeMinDelta = 0,
+                motionStateChanged = false,
+                inBoundsChanged = false,
+                elapsedSinceSyncMs = 1_000L
+            )
+        )
+        assertTrue(
+            WorkerTelemetrySyncManager.shouldSyncTelemetry(
+                forceSync = false,
+                initialSyncDone = true,
+                isAppInForeground = false,
+                stepDelta = 25,
+                activeMinDelta = 0,
+                motionStateChanged = false,
+                inBoundsChanged = false,
+                elapsedSinceSyncMs = 95_000L
+            )
+        )
+        assertFalse(
+            WorkerTelemetrySyncManager.shouldSyncTelemetry(
+                forceSync = false,
+                initialSyncDone = true,
+                isAppInForeground = false,
+                stepDelta = 5,
+                activeMinDelta = 0,
+                motionStateChanged = false,
+                inBoundsChanged = false,
+                elapsedSinceSyncMs = 95_000L
+            )
+        )
+        assertTrue(
+            WorkerTelemetrySyncManager.shouldSyncTelemetry(
+                forceSync = false,
+                initialSyncDone = true,
+                isAppInForeground = false,
+                stepDelta = 0,
+                activeMinDelta = 0,
+                motionStateChanged = false,
+                inBoundsChanged = false,
+                elapsedSinceSyncMs = 245_000L
+            )
+        )
+        assertFalse(
+            WorkerTelemetrySyncManager.shouldSyncTelemetry(
+                forceSync = false,
+                initialSyncDone = true,
+                isAppInForeground = true,
+                stepDelta = 80,
+                activeMinDelta = 2,
+                motionStateChanged = false,
+                inBoundsChanged = false,
+                elapsedSinceSyncMs = 120_000L
+            )
+        )
+    }
 }
+
 
 

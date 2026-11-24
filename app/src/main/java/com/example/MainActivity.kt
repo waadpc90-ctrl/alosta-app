@@ -114,6 +114,7 @@ open class MainActivity : ComponentActivity() {
         createNotificationChannel()
         if (!isDashboardMode && !packageName.contains("dashboard", ignoreCase = true)) {
             AlOstaBackgroundNotifier.schedulePeriodicCheck(this)
+            WorkerShiftMonitorService.restoreIfShiftActive(this)
         }
         // Clear WebView disk caches whenever versionCode OR build timestamp changes
         // (guarantees every APK rebuild loads fresh assets immediately while keeping warm-start fast)
@@ -177,8 +178,10 @@ open class MainActivity : ComponentActivity() {
         isAppInForeground = false
         super.onPause()
         AlOstaLocationManager.pauseIfIdle(this)
+        WorkerStepTracker.flushHardwareSensor(this)
         WorkerStepTracker.flushPendingDiskWrite(this)
         if (!isDashboardMode && !packageName.contains("dashboard", ignoreCase = true)) {
+            WorkerTelemetrySyncManager.syncIfDue(this, force = true)
             AlOstaBackgroundNotifier.scheduleQuickRecheck(this)
         }
     }
@@ -658,6 +661,11 @@ class AndroidAppBridge(
     @JavascriptInterface
     fun setShiftGeofenceConfig(jsonConfig: String?) {
         if (isTrustedCallerOrigin()) runCatching { WorkerGeofenceMonitor.configureFromJson(context, jsonConfig) }
+    }
+
+    @JavascriptInterface
+    fun setShiftTelemetryConfig(jsonConfig: String?) {
+        if (isTrustedCallerOrigin()) runCatching { WorkerTelemetrySyncManager.configureFromJson(context, jsonConfig) }
     }
 
     @JavascriptInterface

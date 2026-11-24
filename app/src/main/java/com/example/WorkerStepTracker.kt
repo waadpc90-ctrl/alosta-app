@@ -19,11 +19,32 @@ import kotlin.math.sqrt
 
 object WorkerStepTracker : SensorEventListener {
     private const val PREF_FILE = "al_osta_step_prefs_v2"
+    private const val KEY_GLOBAL_TRACKING = "global_active_tracking"
+    private const val KEY_GLOBAL_WORKER_ID = "global_active_worker_id"
+    private const val KEY_GLOBAL_SHIFT_DATE = "global_active_shift_date"
     private const val IDLE_THRESHOLD_MS = 10 * 60 * 1000L
     private const val ACTIVE_WORK_MIN_SECONDS_REQUIRED = 12
     private const val ACTIVE_WORK_MIN_STEPS_REQUIRED = 10
     private const val MAX_PLAUSIBLE_STEPS_PER_SEC = 3.6
     private const val MAX_SINGLE_GAP_RECOVERY_STEPS = 2500
+
+    data class StepSnapshot(
+        val workerId: String,
+        val date: String,
+        val steps: Int,
+        val activeMinutes: Int,
+        val lastStepAt: Long,
+        val lastMotionAt: Long,
+        val recentSteps10m: Int,
+        val recentMotionMin10m: Int,
+        val idleMinutes: Int,
+        val motionState: String,
+        val sensorSource: String,
+        val sensorActive: Boolean,
+        val foregroundServiceActive: Boolean,
+        val permissionGranted: Boolean,
+        val inSiteBounds: Boolean
+    )
 
     private var isRegistered = false
     private var appContext: Context? = null
@@ -102,6 +123,10 @@ object WorkerStepTracker : SensorEventListener {
 
     private fun workerBaselineKey(today: String, workerId: String): String {
         return "baseline_${workerDayId(today, workerId)}"
+    }
+
+    private fun workerBaselineTimeKey(today: String, workerId: String): String {
+        return "baseline_ms_${workerDayId(today, workerId)}"
     }
 
     private fun workerShiftActiveKey(today: String, workerId: String): String {
@@ -360,8 +385,60 @@ object WorkerStepTracker : SensorEventListener {
 
     @Synchronized
     fun ensureRegisteredIfTracking(context: Context) {
+        if (!trackingEnabled || activeWorkerId.isEmpty()) {
+            restoreActiveShiftIfNeeded(context)
+        }
         if (trackingEnabled && activeWorkerId.isNotEmpty() && !isRegistered) {
             start(context)
+        }
+    }
+
+    /**
+     * Restores persisted active shift state after Android kills/restarts the process (e.g. app swiped
+     * away or reclaimed during Doze) while preserving today's steps and hardware step-counter baseline.
+     */
+    @Synchronized
+    fun restoreActiveShiftIfNeeded(context: Context): String {
+        val ctx = context.applicationContext
+        appContext = ctx
+        val today = todayKey()
+        if (trackingEnabled && activeWorkerId.isNotEmpty()) {
+            if (!isRegistered) start(ctx)
+            return activeWorkerId
+        }
+        val prefs = ctx.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+        val wasActive = prefs.getBoolean(KEY_GLOBAL_TRACKING, false)
+        val savedId = prefs.getString(KEY_GLOBAL_WORKER_ID, "").orEmpty().trim()
+        val savedDate = prefs.getString(KEY_GLOBAL_SHIFT_DATE, "").orEmpty().trim()
+        if (!wasActive || savedId.isEmpty() || savedDate != today) {
+            if (wasActive && savedDate.isNotEmpty() && savedDate != today) {
+                prefs.edit()
+                    .putBoolean(KEY_GLOBAL_TRACKING, false)
+                    .remove(KEY_GLOBAL_WORKER_ID)
+                    .remove(KEY_GLOBAL_SHIFT_DATE)
+                    .apply()
+            }
+            return ""
+        }
+        val hasExistingBaseline = prefs.getFloat(workerBaselineKey(today, savedId), -1f) >= 0f
+        activeWorkerId = savedId
+        trackingEnabled = true
+        rebaselineNeeded = !hasExistingBaseline
+        resetCadenceFilter()
+        ensureCacheLoaded(prefs, today, savedId)
+        if (!isRegistered) {
+            start(ctx)
+        }
+        return savedId
+    }
+
+    @Synchronized
+    fun flushHardwareSensor(context: Context) {
+        if (!isRegistered) return
+        try {
+            val sm = context.applicationContext.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+            sm?.flush(this)
+        } catch (_: Exception) {
         }
     }
 
@@ -373,10 +450,15 @@ object WorkerStepTracker : SensorEventListener {
         val today = todayKey()
         val cleanId = workerId.trim()
         if (!enabled || cleanId.isEmpty()) {
-            val prevId = activeWorkerId
+            val prevId = activeWorkerId.ifEmpty { prefs.getString(KEY_GLOBAL_WORKER_ID, "").orEmpty().trim() }
+            val editor = prefs.edit()
+                .putBoolean(KEY_GLOBAL_TRACKING, false)
+                .remove(KEY_GLOBAL_WORKER_ID)
+                .remove(KEY_GLOBAL_SHIFT_DATE)
             if (prevId.isNotEmpty()) {
-                prefs.edit().putBoolean(workerShiftActiveKey(today, prevId), false).apply()
+                editor.putBoolean(workerShiftActiveKey(today, prevId), false)
             }
+            editor.apply()
             if (trackingEnabled || isRegistered || WorkerShiftMonitorService.isRunning) {
                 trackingEnabled = false
                 activeWorkerId = ""
@@ -396,7 +478,12 @@ object WorkerStepTracker : SensorEventListener {
             rebaselineNeeded = !(wasShiftPersistedActive && hasExistingBaseline)
             resetCadenceFilter()
         }
-        prefs.edit().putBoolean(workerShiftActiveKey(today, cleanId), true).apply()
+        prefs.edit()
+            .putBoolean(workerShiftActiveKey(today, cleanId), true)
+            .putBoolean(KEY_GLOBAL_TRACKING, true)
+            .putString(KEY_GLOBAL_WORKER_ID, cleanId)
+            .putString(KEY_GLOBAL_SHIFT_DATE, today)
+            .apply()
         activeWorkerId = cleanId
         trackingEnabled = true
         if (!isRegistered) {
@@ -494,7 +581,10 @@ object WorkerStepTracker : SensorEventListener {
                 val totalSinceBoot = event.values.firstOrNull() ?: return
                 if (totalSinceBoot >= 0f) {
                     val existingDaily = readLiveSteps(prefs, today, workerId)
-                    prefs.edit().putFloat(baseKey, (totalSinceBoot - existingDaily).coerceAtLeast(0f)).apply()
+                    prefs.edit()
+                        .putFloat(baseKey, (totalSinceBoot - existingDaily).coerceAtLeast(0f))
+                        .putLong(workerBaselineTimeKey(today, workerId), now)
+                        .apply()
                     rebaselineNeeded = false
                 }
             }
@@ -510,23 +600,33 @@ object WorkerStepTracker : SensorEventListener {
                 lastHardwareStepMs = now
                 val existingDaily = readLiveSteps(prefs, today, workerId)
                 val savedBaseline = prefs.getFloat(baseKey, -1f)
+                val baseTimeKey = workerBaselineTimeKey(today, workerId)
                 if (rebaselineNeeded || savedBaseline < 0f || totalSinceBoot < savedBaseline) {
                     val newBaseline = (totalSinceBoot - existingDaily).coerceAtLeast(0f)
-                    prefs.edit().putFloat(baseKey, newBaseline).apply()
+                    prefs.edit()
+                        .putFloat(baseKey, newBaseline)
+                        .putLong(baseTimeKey, now)
+                        .apply()
                     rebaselineNeeded = false
                 } else {
                     val computedDaily = (totalSinceBoot - savedBaseline).roundToInt().coerceAtLeast(0)
                     val delta = computedDaily - existingDaily
+                    val savedBaselineMs = prefs.getLong(baseTimeKey, 0L)
                     val elapsedMs = when {
                         prevCounterMs > 0L -> (now - prevCounterMs).coerceAtLeast(1000L)
                         cachedLastStepAtMs > 0L -> (now - cachedLastStepAtMs).coerceAtLeast(1000L)
-                        else -> 60_000L
+                        savedBaselineMs > 0L -> (now - savedBaselineMs).coerceAtLeast(1000L)
+                        else -> 10 * 60_000L
                     }
                     if (isPlausibleStepDelta(delta, elapsedMs)) {
                         recordConfirmedSteps(prefs, today, workerId, computedDaily, delta, now)
+                        prefs.edit().putLong(baseTimeKey, now).apply()
                     } else if (delta > 0) {
                         // Guard against implausible off-shift/reboot/vehicle jump: rebase smoothly to existingDaily
-                        prefs.edit().putFloat(baseKey, (totalSinceBoot - existingDaily).coerceAtLeast(0f)).apply()
+                        prefs.edit()
+                            .putFloat(baseKey, (totalSinceBoot - existingDaily).coerceAtLeast(0f))
+                            .putLong(baseTimeKey, now)
+                            .apply()
                     }
                 }
             }
@@ -647,16 +747,12 @@ object WorkerStepTracker : SensorEventListener {
     }
 
     @Synchronized
-    fun getStepMetricsJson(context: Context, workerIdParam: String = ""): String {
+    fun getSnapshot(context: Context, workerIdParam: String = ""): StepSnapshot {
         // Flush hardware FIFO batch so latest steps are reflected immediately
         if (isRegistered && hasStepCounterSensor) {
-            try {
-                val sm = context.applicationContext.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
-                sm?.flush(this)
-            } catch (_: Exception) {
-            }
+            flushHardwareSensor(context)
         }
-        val prefs = context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+        val prefs = context.applicationContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
         val today = todayKey()
         val targetWorkerId = workerIdParam.trim().ifEmpty { activeWorkerId }
         val now = System.currentTimeMillis()
@@ -687,19 +783,6 @@ object WorkerStepTracker : SensorEventListener {
             (now - lastMotionAt) <= IDLE_THRESHOLD_MS -> "active"
             else -> "idle"
         }
-
-        val distanceMeters = (steps * 0.74).roundToInt()
-        val calories = computeNativeEnergyKcal(steps, activeMinutes)
-        val effortScore = min(100, ((steps.toDouble() / 6000.0) * 100.0).roundToInt())
-        val effortStars = when {
-            effortScore >= 100 -> 6
-            effortScore >= 75 -> 5
-            effortScore >= 50 -> 4
-            effortScore >= 30 -> 3
-            effortScore >= 12 -> 2
-            steps > 0 || activeMinutes > 0 -> 1
-            else -> 0
-        }
         val sensorSource = when {
             hasStepCounterSensor -> "step_counter"
             hasStepDetectorSensor -> "step_detector"
@@ -709,7 +792,41 @@ object WorkerStepTracker : SensorEventListener {
         val activeNow = isRegistered && trackingEnabled && activeWorkerId.isNotEmpty()
         val permGranted = hasActivityRecognitionPermission(context)
         val fgsActive = WorkerShiftMonitorService.isRunning
-        return """{"steps":$steps,"distanceMeters":$distanceMeters,"calories":$calories,"effortScore":$effortScore,"effortStars":$effortStars,"activeMinutes":$activeMinutes,"lastStepAt":$lastStepAt,"lastMotionAt":$lastMotionAt,"recentSteps10m":$recentSteps10m,"recentMotionMin10m":$recentMotionMin10m,"idleMinutes":$idleMinutes,"motionState":"$motionState","sensorSource":"$sensorSource","foregroundServiceActive":$fgsActive,"sensorActive":$activeNow,"permissionGranted":$permGranted,"date":"$today"}"""
+        return StepSnapshot(
+            workerId = targetWorkerId,
+            date = today,
+            steps = steps,
+            activeMinutes = activeMinutes,
+            lastStepAt = lastStepAt,
+            lastMotionAt = lastMotionAt,
+            recentSteps10m = recentSteps10m,
+            recentMotionMin10m = recentMotionMin10m,
+            idleMinutes = idleMinutes,
+            motionState = motionState,
+            sensorSource = sensorSource,
+            sensorActive = activeNow,
+            foregroundServiceActive = fgsActive,
+            permissionGranted = permGranted,
+            inSiteBounds = inSiteBounds
+        )
+    }
+
+    @Synchronized
+    fun getStepMetricsJson(context: Context, workerIdParam: String = ""): String {
+        val snap = getSnapshot(context, workerIdParam)
+        val distanceMeters = (snap.steps * 0.74).roundToInt()
+        val calories = computeNativeEnergyKcal(snap.steps, snap.activeMinutes)
+        val effortScore = min(100, ((snap.steps.toDouble() / 6000.0) * 100.0).roundToInt())
+        val effortStars = when {
+            effortScore >= 100 -> 6
+            effortScore >= 75 -> 5
+            effortScore >= 50 -> 4
+            effortScore >= 30 -> 3
+            effortScore >= 12 -> 2
+            snap.steps > 0 || snap.activeMinutes > 0 -> 1
+            else -> 0
+        }
+        return """{"steps":${snap.steps},"distanceMeters":$distanceMeters,"calories":$calories,"effortScore":$effortScore,"effortStars":$effortStars,"activeMinutes":${snap.activeMinutes},"lastStepAt":${snap.lastStepAt},"lastMotionAt":${snap.lastMotionAt},"recentSteps10m":${snap.recentSteps10m},"recentMotionMin10m":${snap.recentMotionMin10m},"idleMinutes":${snap.idleMinutes},"motionState":"${snap.motionState}","sensorSource":"${snap.sensorSource}","foregroundServiceActive":${snap.foregroundServiceActive},"sensorActive":${snap.sensorActive},"permissionGranted":${snap.permissionGranted},"date":"${snap.date}"}"""
     }
 
     @Synchronized

@@ -3,7 +3,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.23";
+        const APP_VERSION = "1.0.24";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -12694,6 +12694,32 @@
                 } catch (e) {}
             }, [isWorkerShiftRunning, workerSyncing, tA?.id, tA?.timeIn, tA?.date, tA?.projectId, activeProject?.id, activeProject?.title, activeProject?.adminId, activeSiteCoords?.lat, activeSiteCoords?.lng, allowedRadius, lW.id, lW.name, lW.adminId]);
 
+            // Sync active shift telemetry parameters to native Android service so steps, effort & heartbeat
+            // keep uploading to Firestore even when the phone is locked, backgrounded, or the app is closed.
+            useEffect(() => {
+                try {
+                    if (!window.AndroidApp || typeof window.AndroidApp.setShiftTelemetryConfig !== 'function') return;
+                    const telemetryAdminId = String(activeProject?.adminId || lW.adminId || worker?.adminId || '').trim();
+                    if (isWorkerShiftRunning && tA?.id && lW?.id) {
+                        window.AndroidApp.setShiftTelemetryConfig(JSON.stringify({
+                            active: true,
+                            workerId: lW.id,
+                            adminId: telemetryAdminId,
+                            attendanceId: tA.id,
+                            specialty: lW.specialty || '',
+                            timeIn: tA.timeIn || Date.now(),
+                            date: tA.date || todayStr(),
+                            baseSteps: getVerifiedRecordSteps(tA),
+                            baseActiveMinutes: (tA.stepEngineV2 === true) ? (parseInt(tA.activeMinutes, 10) || 0) : 0,
+                            fbProjectId: firebaseConfig.projectId || '',
+                            fbApiKey: firebaseConfig.apiKey || ''
+                        }));
+                    } else if (!workerSyncing) {
+                        window.AndroidApp.setShiftTelemetryConfig(JSON.stringify({ active: false }));
+                    }
+                } catch (e) {}
+            }, [isWorkerShiftRunning, workerSyncing, tA?.id, tA?.timeIn, tA?.date, tA?.steps, tA?.activeMinutes, activeProject?.adminId, lW.id, lW.specialty, lW.adminId]);
+
             useEffect(() => {
                 let watchId = null;
                 let intervalId = null;
@@ -12787,6 +12813,15 @@
                                 workers: { [lW.id]: autoTelemetry }
                             }, { merge: true }).catch(() => {});
                         }
+                        setNativeStepTracking(false, '');
+                        try {
+                            if (window.AndroidApp && typeof window.AndroidApp.setShiftTelemetryConfig === 'function') {
+                                window.AndroidApp.setShiftTelemetryConfig(JSON.stringify({ active: false }));
+                            }
+                            if (window.AndroidApp && typeof window.AndroidApp.setShiftGeofenceConfig === 'function') {
+                                window.AndroidApp.setShiftGeofenceConfig(JSON.stringify({ active: false }));
+                            }
+                        } catch (e) {}
                     }
                 };
                 updateClock();
@@ -12806,11 +12841,8 @@
                 }
             }, [isShiftActiveForSteps, workerSyncing, lW.id]);
 
-            useEffect(() => {
-                return () => {
-                    setNativeStepTracking(false, '');
-                };
-            }, []);
+            // IMPORTANT: Do NOT stop native step tracking on component unmount — closing/reloading the WebView
+            // mid-shift must leave WorkerShiftMonitorService & hardware sensors running until explicit clock-out or logout.
 
             // Pause step accumulation if worker is confirmed well outside project site geofence (> allowedRadius + 50m)
             useEffect(() => {
@@ -12933,8 +12965,8 @@
                             forceSync ||
                             inBoundsChanged ||
                             motionStateChanged ||
-                            (stepDelta >= 350 && elapsedSinceSync >= 480000) ||
-                            (activeMinDelta >= 12 && elapsedSinceSync >= 600000) ||
+                            (stepDelta >= 100 && elapsedSinceSync >= 180000) ||
+                            (activeMinDelta >= 4 && elapsedSinceSync >= 180000) ||
                             elapsedSinceSync >= 960000
                         );
 
@@ -13019,18 +13051,23 @@
                 forceSyncStepsRef.current = syncSteps;
                 syncSteps(true);
                 const stepInterval = setInterval(() => syncSteps(false), 2500);
-                const handleResume = () => {
+                const handleVisibilityOrFocus = () => {
                     if (!document.hidden) {
                         setNativeStepTracking(true, lW.id);
                         syncSteps(true);
+                    } else {
+                        syncSteps(true);
                     }
                 };
-                document.addEventListener('visibilitychange', handleResume);
-                window.addEventListener('focus', handleResume);
+                const handlePageHide = () => { syncSteps(true); };
+                document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+                window.addEventListener('focus', handleVisibilityOrFocus);
+                window.addEventListener('pagehide', handlePageHide);
                 return () => {
                     clearInterval(stepInterval);
-                    document.removeEventListener('visibilitychange', handleResume);
-                    window.removeEventListener('focus', handleResume);
+                    document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+                    window.removeEventListener('focus', handleVisibilityOrFocus);
+                    window.removeEventListener('pagehide', handlePageHide);
                 };
             }, [isShiftActiveForSteps, lW.id, lW.specialty, tA?.id, lang]);
 
@@ -13219,6 +13256,9 @@
                     const m = readNativeStepMetrics(lW.id);
                     setNativeStepTracking(false, '');
                     try {
+                        if (window.AndroidApp && typeof window.AndroidApp.setShiftTelemetryConfig === 'function') {
+                            window.AndroidApp.setShiftTelemetryConfig(JSON.stringify({ active: false }));
+                        }
                         if (window.AndroidApp && typeof window.AndroidApp.setShiftGeofenceConfig === 'function') {
                             window.AndroidApp.setShiftGeofenceConfig(JSON.stringify({ active: false }));
                         }
@@ -16324,6 +16364,15 @@
                 try {
                     if (window.AndroidApp && typeof window.AndroidApp.clearNotificationProfile === 'function') {
                         window.AndroidApp.clearNotificationProfile();
+                    }
+                    if (window.AndroidApp && typeof window.AndroidApp.setShiftTelemetryConfig === 'function') {
+                        window.AndroidApp.setShiftTelemetryConfig(JSON.stringify({ active: false }));
+                    }
+                    if (window.AndroidApp && typeof window.AndroidApp.setShiftGeofenceConfig === 'function') {
+                        window.AndroidApp.setShiftGeofenceConfig(JSON.stringify({ active: false }));
+                    }
+                    if (window.AndroidApp && typeof window.AndroidApp.setStepTrackingState === 'function') {
+                        window.AndroidApp.setStepTrackingState(false, '');
                     }
                 } catch (e) {}
                 localStorage.removeItem('cw_v42_s');

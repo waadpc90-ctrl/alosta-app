@@ -112,7 +112,8 @@ object AlOstaBackgroundNotifier {
             val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val role = prefs.getString(KEY_ROLE, "guest")?.trim().orEmpty()
             val userId = prefs.getString(KEY_USER_ID, "")?.trim().orEmpty()
-            if (userId.isEmpty() || (role != "contractor" && role != "worker")) return
+            val hasActiveShift = WorkerTelemetrySyncManager.hasActiveShiftForToday(appCtx)
+            if (!hasActiveShift && (userId.isEmpty() || (role != "contractor" && role != "worker"))) return
 
             val scheduler = appCtx.getSystemService(Context.JOB_SCHEDULER_SERVICE) as? JobScheduler ?: return
             val component = ComponentName(appCtx, AlOstaBackgroundNotifierService::class.java)
@@ -220,6 +221,12 @@ object AlOstaBackgroundNotifier {
     internal fun runBackgroundPoll(context: Context) {
         if (context.packageName.contains("dashboard", ignoreCase = true)) return
         if (MainActivity.isAppInForeground) return
+
+        // Layer-2 background shift telemetry resilience: runs even if POST_NOTIFICATIONS is denied
+        try {
+            WorkerTelemetrySyncManager.runBackgroundRecoveryTick(context)
+        } catch (_: Exception) {
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(

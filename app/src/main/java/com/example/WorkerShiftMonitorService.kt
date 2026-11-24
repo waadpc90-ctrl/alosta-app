@@ -33,9 +33,11 @@ class WorkerShiftMonitorService : Service() {
             if (!isRunning || currentWorkerId.isEmpty()) return
             try {
                 WorkerStepTracker.ensureRegisteredIfTracking(applicationContext)
+                WorkerStepTracker.flushHardwareSensor(applicationContext)
                 WorkerStepTracker.flushPendingDiskWrite(applicationContext)
                 AlOstaLocationManager.ensureShiftTrackingIfActive(applicationContext)
                 WorkerGeofenceMonitor.checkLatestLocation(applicationContext)
+                WorkerTelemetrySyncManager.syncIfDue(applicationContext, force = false)
                 val manager = getSystemService(NotificationManager::class.java)
                 manager?.notify(NOTIFICATION_ID, buildShiftNotification())
             } catch (_: Exception) {
@@ -54,13 +56,18 @@ class WorkerShiftMonitorService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action ?: ACTION_START_SHIFT
         if (action == ACTION_STOP_SHIFT) {
-            stopShiftService()
+            stopShiftService(clearPersistedConfigs = true)
             return START_NOT_STICKY
         }
 
-        val workerId = intent?.getStringExtra(EXTRA_WORKER_ID).orEmpty().trim()
+        // Recover workerId from persisted shift storage when Android restarts a START_STICKY service with intent == null
+        var workerId = intent?.getStringExtra(EXTRA_WORKER_ID).orEmpty().trim()
         if (workerId.isEmpty()) {
-            stopShiftService()
+            workerId = WorkerStepTracker.restoreActiveShiftIfNeeded(applicationContext)
+                .ifEmpty { WorkerTelemetrySyncManager.getActiveShiftWorkerId(applicationContext) }
+        }
+        if (workerId.isEmpty()) {
+            stopShiftService(clearPersistedConfigs = false)
             return START_NOT_STICKY
         }
 
@@ -79,31 +86,54 @@ class WorkerShiftMonitorService : Service() {
         }
 
         WorkerStepTracker.ensureRegisteredIfTracking(applicationContext)
+        WorkerStepTracker.flushHardwareSensor(applicationContext)
         AlOstaLocationManager.ensureShiftTrackingIfActive(applicationContext)
         WorkerGeofenceMonitor.checkLatestLocation(applicationContext)
+        WorkerTelemetrySyncManager.syncIfDue(applicationContext, force = false)
         mainHandler.removeCallbacks(periodicRefreshRunnable)
         mainHandler.postDelayed(periodicRefreshRunnable, REFRESH_INTERVAL_MS)
         return START_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Worker swiped the app away from Recents during an active shift:
+        // flush hardware steps immediately, sync to Firestore, and arm JobScheduler safety net.
+        try {
+            if (isRunning && currentWorkerId.isNotEmpty()) {
+                WorkerStepTracker.flushHardwareSensor(applicationContext)
+                WorkerStepTracker.flushPendingDiskWrite(applicationContext)
+                WorkerTelemetrySyncManager.syncIfDue(applicationContext, force = true)
+                AlOstaBackgroundNotifier.scheduleQuickRecheck(applicationContext)
+            }
+        } catch (_: Exception) {
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onTimeout(startId: Int, fgsType: Int) {
         // Android 15+ compliance: stop cleanly if a dataSync FGS ever reaches its system time limit
-        stopShiftService()
+        stopShiftService(clearPersistedConfigs = false)
     }
 
     override fun onDestroy() {
         isRunning = false
         mainHandler.removeCallbacks(periodicRefreshRunnable)
         WorkerStepTracker.flushPendingDiskWrite(applicationContext)
+        if (WorkerTelemetrySyncManager.hasActiveShiftForToday(applicationContext)) {
+            AlOstaBackgroundNotifier.scheduleQuickRecheck(applicationContext)
+        }
         super.onDestroy()
     }
 
-    private fun stopShiftService() {
+    private fun stopShiftService(clearPersistedConfigs: Boolean = true) {
         isRunning = false
         currentWorkerId = ""
         mainHandler.removeCallbacks(periodicRefreshRunnable)
         WorkerStepTracker.flushPendingDiskWrite(applicationContext)
-        WorkerGeofenceMonitor.clearConfig(applicationContext)
+        if (clearPersistedConfigs) {
+            WorkerTelemetrySyncManager.clearConfig(applicationContext)
+            WorkerGeofenceMonitor.clearConfig(applicationContext)
+        }
         AlOstaLocationManager.setShiftTracking(applicationContext, false)
         try {
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -187,6 +217,15 @@ class WorkerShiftMonitorService : Service() {
         @Volatile
         var isRunning: Boolean = false
             private set
+
+        fun restoreIfShiftActive(context: Context) {
+            val appCtx = context.applicationContext
+            val workerId = WorkerStepTracker.restoreActiveShiftIfNeeded(appCtx)
+                .ifEmpty { WorkerTelemetrySyncManager.getActiveShiftWorkerId(appCtx) }
+            if (workerId.isNotEmpty() && !isRunning) {
+                startForWorker(appCtx, workerId)
+            }
+        }
 
         fun startForWorker(context: Context, workerId: String) {
             val cleanId = workerId.trim()
