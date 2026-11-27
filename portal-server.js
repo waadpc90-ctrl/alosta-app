@@ -6,7 +6,7 @@ const { spawn } = require('child_process');
 
 const PORT = process.env.DEFAULT_APP_PORT || 3000;
 const ASSETS_DIR = path.join(__dirname, 'app', 'src', 'main', 'assets');
-const PORTAL_VERSION = '1.0.26';
+const PORTAL_VERSION = '1.0.27';
 const GITHUB_PAGES_BASE = 'https://waadpc90-ctrl.github.io/alosta-app/';
 const GITHUB_APK_URL = 'https://waadpc90-ctrl.github.io/alosta-app/AlOsta_App.apk';
 

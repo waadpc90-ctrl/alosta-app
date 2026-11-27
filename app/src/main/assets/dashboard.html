@@ -12,12 +12,12 @@
     <link rel="apple-touch-icon" href="./apple-touch-icon.png">
     <link rel="icon" type="image/png" sizes="192x192" href="./app-icon-192.png">
     <link rel="manifest" href="./manifest.json">
-    <title>لوحة تحكم الأسطة المركزية | Dashboard v1.0.26</title>
+    <title>لوحة تحكم الأسطة المركزية | Dashboard v1.0.27</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
-    <link rel="stylesheet" href="./vendor/app-tailwind.css?v=v1_0_26">
+    <link rel="stylesheet" href="./vendor/app-tailwind.css?v=v1_0_27">
     <script src="./vendor/react.production.min.js"></script>
     <script src="./vendor/react-dom.production.min.js"></script>
     <script src="./vendor/qrious.min.js"></script>
@@ -34,15 +34,29 @@
             background-color: #020617;
             font-family: 'Cairo', system-ui, -apple-system, sans-serif;
         }
+        .auth-scroll-shell {
+            justify-content: flex-start !important;
+        }
+        .modal-scroll-body {
+            max-height: 92%;
+        }
         html.keyboard-open main,
+        html.keyboard-open .auth-scroll-shell {
+            scroll-padding-top: 16px;
+            scroll-padding-bottom: 36px;
+            padding-bottom: calc(36px + var(--kb-inset, 0px)) !important;
+        }
         html.keyboard-open .modal-scroll-body {
-            scroll-padding-bottom: 120px;
-            padding-bottom: 110px !important;
+            max-height: calc(100% - 8px) !important;
+            scroll-padding-top: 16px;
+            scroll-padding-bottom: 36px;
+            padding-bottom: calc(36px + var(--kb-inset, 0px)) !important;
         }
     </style>
     <script>
         (function () {
             var blurTimer = null;
+            var focusTimers = [];
             var isTextInput = function (el) {
                 if (!el || !el.tagName) return false;
                 var tag = el.tagName.toUpperCase();
@@ -53,25 +67,82 @@
                 }
                 return false;
             };
-            var scrollEl = function (el) {
+            var clearFocusTimers = function () {
+                while (focusTimers.length) { clearTimeout(focusTimers.pop()); }
+            };
+            var findScrollContainer = function (el) {
+                var node = el && el.parentElement;
+                while (node && node !== document.body && node !== document.documentElement) {
+                    var st = window.getComputedStyle(node);
+                    var oy = st.overflowY;
+                    if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') {
+                        if (node.scrollHeight > node.clientHeight + 2 || node.classList.contains('modal-scroll-body') || node.classList.contains('auth-scroll-shell')) {
+                            return node;
+                        }
+                    }
+                    node = node.parentElement;
+                }
+                return document.scrollingElement || document.documentElement;
+            };
+            var keepInputAboveKeyboard = function (el) {
                 if (!isTextInput(el)) return;
-                try { el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } catch (e) {}
+                var vv = window.visualViewport;
+                var vpTop = vv ? vv.offsetTop : 0;
+                var vpBottom = vv ? (vv.offsetTop + vv.height) : window.innerHeight;
+                var kbInset = Math.max(0, Math.round(window.innerHeight - vpBottom));
+                document.documentElement.style.setProperty('--kb-inset', (kbInset > 60 ? kbInset : 0) + 'px');
+                var container = findScrollContainer(el);
+                if (!container) return;
+                var isDoc = (container === document.documentElement || container === document.body);
+                var cTop = isDoc ? vpTop : container.getBoundingClientRect().top;
+                var cBottom = isDoc ? vpBottom : container.getBoundingClientRect().bottom;
+                var safeTop = Math.max(cTop, vpTop) + 12;
+                var safeBottom = Math.min(cBottom, vpBottom) - 18;
+                var r = el.getBoundingClientRect();
+                if (r.bottom > safeBottom) {
+                    var deltaDown = Math.min(r.bottom - safeBottom, Math.max(0, r.top - safeTop));
+                    if (deltaDown > 1) {
+                        if (isDoc) window.scrollBy(0, deltaDown); else container.scrollTop += deltaDown;
+                    }
+                } else if (r.top < safeTop) {
+                    var deltaUp = safeTop - r.top;
+                    if (deltaUp > 1) {
+                        if (isDoc) window.scrollBy(0, -deltaUp); else container.scrollTop = Math.max(0, container.scrollTop - deltaUp);
+                    }
+                }
             };
             document.addEventListener('focusin', function (e) {
-                if (!isTextInput(e.target)) return;
+                var target = e.target;
+                if (!isTextInput(target)) return;
                 if (blurTimer) { clearTimeout(blurTimer); blurTimer = null; }
+                clearFocusTimers();
                 document.documentElement.classList.add('keyboard-open');
-                setTimeout(function () { scrollEl(e.target); }, 120);
-                setTimeout(function () { scrollEl(e.target); }, 340);
+                requestAnimationFrame(function () { keepInputAboveKeyboard(target); });
+                [90, 220, 420].forEach(function (ms) {
+                    focusTimers.push(setTimeout(function () {
+                        if (document.activeElement === target) keepInputAboveKeyboard(target);
+                    }, ms));
+                });
+            }, true);
+            document.addEventListener('input', function (e) {
+                if (isTextInput(e.target) && document.activeElement === e.target) {
+                    requestAnimationFrame(function () { keepInputAboveKeyboard(e.target); });
+                }
             }, true);
             document.addEventListener('focusout', function () {
+                clearFocusTimers();
                 if (blurTimer) clearTimeout(blurTimer);
                 blurTimer = setTimeout(function () {
-                    if (!isTextInput(document.activeElement)) document.documentElement.classList.remove('keyboard-open');
+                    if (!isTextInput(document.activeElement)) {
+                        document.documentElement.classList.remove('keyboard-open');
+                        document.documentElement.style.setProperty('--kb-inset', '0px');
+                    }
                 }, 150);
             }, true);
             var onResize = function () {
-                if (isTextInput(document.activeElement)) setTimeout(function () { scrollEl(document.activeElement); }, 60);
+                if (isTextInput(document.activeElement)) {
+                    requestAnimationFrame(function () { keepInputAboveKeyboard(document.activeElement); });
+                }
             };
             if (window.visualViewport) window.visualViewport.addEventListener('resize', onResize);
             window.addEventListener('resize', onResize);
@@ -87,10 +158,10 @@
 
     <!-- Security markers verified by Robolectric & unit test suites:
          buildSafeStoreContactPayload | authorizedPortalCode
-         const APP_VERSION = "1.0.26";
+         const APP_VERSION = "1.0.27";
     -->
-    <script src="./vendor/alosta-engine.js?v=v1_0_26"></script>
-    <script src="./vendor/dashboard-compiled.js?v=v1_0_26"></script>
+    <script src="./vendor/alosta-engine.js?v=v1_0_27"></script>
+    <script src="./vendor/dashboard-compiled.js?v=v1_0_27"></script>
 </body>
 
 </html>

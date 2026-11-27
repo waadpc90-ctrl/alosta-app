@@ -1,5 +1,5 @@
         // =========================================================================
-        // AL-OSTA PLATFORM CENTRAL DASHBOARD (v1.0.26 — COMPLETE EDITION)
+        // AL-OSTA PLATFORM CENTRAL DASHBOARD (v1.0.27 — COMPLETE EDITION)
         // Full 5-Tab Cloud Administration Suite + StoreOwnerPortal:
         // 1. 👷 المقاولون (admins) — CRUD, Pro Plans, Projects/Workers Count, Password Reset, WhatsApp
         // 2. 🛠️ العمال والحرفيون (workers) — CRUD, Pro Verification, Login Codes, Wages, Ratings
@@ -17,7 +17,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.26";
+        const APP_VERSION = "1.0.27";
         const { useState, useEffect, useMemo, useRef } = React;
 
         const firebaseConfig = {
@@ -753,7 +753,7 @@
 
             return (
                 <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-                    <form onSubmit={handleSubmit} className="bg-slate-900 border border-slate-700 rounded-3xl max-w-lg w-full p-5 space-y-3 shadow-2xl max-h-[92vh] overflow-y-auto">
+                    <form onSubmit={handleSubmit} className="modal-scroll-body bg-slate-900 border border-slate-700 rounded-3xl max-w-lg w-full p-5 space-y-3 shadow-2xl max-h-[92vh] overflow-y-auto">
                         <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                             <div>
                                 <h3 className="font-black text-base text-white">
@@ -1172,8 +1172,8 @@
 
             if (!resolvedKey || error) {
                 return (
-                    <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center p-4" dir="rtl">
-                        <div className="bg-slate-900 border border-slate-800 p-6 rounded-3xl max-w-sm w-full space-y-4 text-center">
+                    <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-start auth-scroll-shell overflow-y-auto p-4" dir="rtl">
+                        <div className="bg-slate-900 border border-slate-800 p-6 rounded-3xl max-w-sm w-full space-y-4 text-center my-auto">
                             <div className="text-4xl">🏪</div>
                             <h2 className="font-black text-lg">بوابة صاحب المعرض وإدارة القوائم والمنتجات</h2>
                             {error && <div className="p-3 rounded-2xl bg-rose-950/60 border border-rose-700/50 text-rose-300 text-xs font-bold">{error}</div>}
@@ -2056,7 +2056,7 @@
                 <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
                     <form
                         onSubmit={handleSubmit}
-                        className="bg-slate-900 border border-slate-700 rounded-3xl max-w-2xl w-full p-5 space-y-4 shadow-2xl max-h-[93vh] overflow-y-auto"
+                        className="modal-scroll-body bg-slate-900 border border-slate-700 rounded-3xl max-w-2xl w-full p-5 space-y-4 shadow-2xl max-h-[93vh] overflow-y-auto"
                     >
                         {/* Sticky Modal Header + Organized Menu Tabs */}
                         <div className="border-b border-slate-800 pb-3 sticky top-0 bg-slate-900 z-10 space-y-3">
@@ -3437,7 +3437,7 @@
                 const cleanPortalUrl = String(appConfig.portalBaseUrl ?? '').trim() || 'https://waadpc90-ctrl.github.io/alosta-app/';
 
                 if (!cleanVersion) {
-                    setConfigSaveError('يرجى كتابة رقم الإصدار (مثال: 1.0.26) قبل الحفظ.');
+                    setConfigSaveError('يرجى كتابة رقم الإصدار (مثال: 1.0.27) قبل الحفظ.');
                     addToast('⚠️ يرجى كتابة رقم الإصدار قبل الحفظ', 'error');
                     return;
                 }
@@ -4918,7 +4918,7 @@
                                                     dir="ltr"
                                                     value={appConfig.latestVersion ?? ''}
                                                     onChange={(e) => updateAppConfigFields({ latestVersion: e.target.value })}
-                                                    placeholder="1.0.26"
+                                                    placeholder="1.0.27"
                                                     className="flex-1 p-3 rounded-2xl bg-slate-950 border border-slate-800 focus:border-amber-400 focus:outline-none text-sm font-mono font-black text-amber-300"
                                                 />
                                                 <button
@@ -5159,7 +5159,7 @@
                     {/* Contractor Modal */}
                     {editingContractor && (
                         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-                            <form onSubmit={handleSaveContractorModal} className="bg-slate-900 border border-slate-700 rounded-3xl max-w-md w-full p-5 space-y-3.5 shadow-2xl max-h-[90vh] overflow-y-auto">
+                            <form onSubmit={handleSaveContractorModal} className="modal-scroll-body bg-slate-900 border border-slate-700 rounded-3xl max-w-md w-full p-5 space-y-3.5 shadow-2xl max-h-[90vh] overflow-y-auto">
                                 <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                                     <h3 className="font-black text-base text-white">
                                         {editingContractor.isNew ? '+ إنشاء حساب مقاول جديد' : `✏️ تعديل المقاول: ${editingContractor.name || editingContractor.id}`}
@@ -5228,7 +5228,7 @@
                     {/* Worker Modal */}
                     {editingWorker && (
                         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-                            <form onSubmit={handleSaveWorkerModal} className="bg-slate-900 border border-slate-700 rounded-3xl max-w-md w-full p-5 space-y-3.5 shadow-2xl max-h-[90vh] overflow-y-auto">
+                            <form onSubmit={handleSaveWorkerModal} className="modal-scroll-body bg-slate-900 border border-slate-700 rounded-3xl max-w-md w-full p-5 space-y-3.5 shadow-2xl max-h-[90vh] overflow-y-auto">
                                 <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                                     <h3 className="font-black text-base text-white">
                                         {editingWorker.isNew ? '+ إضافة عامل / حرفي جديد' : `✏️ تعديل العامل: ${editingWorker.name}`}
@@ -5319,7 +5319,7 @@
                     {/* Announcement Modal */}
                     {editingAnnouncement && (
                         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
-                            <form onSubmit={handleSaveAnnouncementModal} className="bg-slate-900 border border-slate-700 rounded-3xl max-w-lg w-full p-5 space-y-3.5 shadow-2xl max-h-[92vh] overflow-y-auto">
+                            <form onSubmit={handleSaveAnnouncementModal} className="modal-scroll-body bg-slate-900 border border-slate-700 rounded-3xl max-w-lg w-full p-5 space-y-3.5 shadow-2xl max-h-[92vh] overflow-y-auto">
                                 <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                                     <h3 className="font-black text-base text-white">
                                         {editingAnnouncement.isNew ? '📢 إنشاء إعلان نظام جديد' : `✏️ تعديل الإعلان: ${editingAnnouncement.title}`}

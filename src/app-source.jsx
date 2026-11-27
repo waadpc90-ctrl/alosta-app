@@ -3,7 +3,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.26";
+        const APP_VERSION = "1.0.27";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -13809,7 +13809,7 @@
 
             if (!isRegisteredWorker) {
                 return (
-                    <div className="app-height overflow-y-auto p-4 sm:p-5 app-surface-bg flex items-center justify-center" style={{ direction: lang === 'ar' ? 'rtl' : 'ltr' }}>
+                    <div className="app-height overflow-y-auto p-4 sm:p-5 app-surface-bg flex items-center justify-start auth-scroll-shell" style={{ direction: lang === 'ar' ? 'rtl' : 'ltr' }}>
                         <div className="w-full max-w-sm bg-white/95 dark:bg-slate-800/95 backdrop-blur-xl p-6 rounded-[2.25rem] shadow-2xl border border-emerald-200 dark:border-slate-700 space-y-4 my-auto animate-enter">
                             <div className="text-center space-y-1.5">
                                 <div className="w-16 h-16 bg-gradient-to-br from-emerald-600 to-teal-600 rounded-2xl mx-auto flex items-center justify-center text-white shadow-lg">
@@ -14908,7 +14908,7 @@
                 : 'from-indigo-600 to-violet-600 shadow-indigo-600/25';
 
             return (
-                <div className="app-height overflow-y-auto p-4 sm:p-5 app-surface-bg relative flex items-center justify-center">
+                <div className="app-height overflow-y-auto p-4 sm:p-5 app-surface-bg relative flex items-center justify-start auth-scroll-shell">
                     <div className="absolute top-4 left-4 flex gap-2 z-50 pointer-events-auto">
                         <ThemeLangToggle />
                     </div>
@@ -15625,8 +15625,8 @@
 
             if (!resolvedKey || error) {
                 return (
-                    <div className="min-h-screen app-surface-bg flex items-center justify-center p-4" style={{ direction: 'rtl' }}>
-                        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-6 rounded-3xl max-w-sm w-full shadow-2xl space-y-4 text-center animate-enter">
+                    <div className="app-height overflow-y-auto app-surface-bg flex items-center justify-start auth-scroll-shell p-4" style={{ direction: 'rtl' }}>
+                        <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-6 rounded-3xl max-w-sm w-full shadow-2xl space-y-4 text-center my-auto animate-enter">
                             <div className="w-16 h-16 rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 mx-auto flex items-center justify-center text-3xl">
                                 🏪
                             </div>
@@ -15688,7 +15688,7 @@
             const filteredProducts = products.filter(p => !searchQ || (p.name || '').includes(searchQ) || (p.brand || '').includes(searchQ));
 
             return (
-                <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-800 dark:text-slate-100 pb-20" style={{ direction: 'rtl' }}>
+                <div className="app-height overflow-y-auto bg-slate-100 dark:bg-slate-950 text-slate-800 dark:text-slate-100 pb-20" style={{ direction: 'rtl' }}>
                     <div className="bg-gradient-to-l from-indigo-900 via-indigo-950 to-slate-900 text-white p-5 shadow-xl border-b border-indigo-500/20">
                         <div className="max-w-4xl mx-auto space-y-3">
                             <div className="flex flex-wrap items-center justify-between gap-2">

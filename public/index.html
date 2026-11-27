@@ -94,7 +94,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
-    <link rel="stylesheet" href="./vendor/app-tailwind.css?v=v1_0_26">
+    <link rel="stylesheet" href="./vendor/app-tailwind.css?v=v1_0_27">
     <script src="./vendor/react.production.min.js"></script>
     <script src="./vendor/react-dom.production.min.js"></script>
     <script src="./vendor/qrious.min.js"></script>
@@ -116,10 +116,10 @@
         html, body, #root {
             width: 100%;
             height: 100%;
-            height: 100dvh;
             min-height: 100%;
             margin: 0;
             padding: 0;
+            overflow: hidden;
             background-color: #eef2ff;
         }
         html.dark, html.dark body, html.dark #root {
@@ -136,14 +136,28 @@
             min-height: 100vh !important;
             min-height: -webkit-fill-available !important;
         }
-        /* Keep bottom inputs & modals cleanly visible above the on-screen keyboard */
-        html.keyboard-open .nav-dock-wrapper {
+        .auth-scroll-shell {
+            justify-content: flex-start !important;
+        }
+        .modal-scroll-body {
+            max-height: 92%;
+        }
+        /* Keep inputs cleanly visible above the on-screen keyboard without pushing top fields off-screen */
+        html.keyboard-open .nav-dock-wrapper,
+        html.keyboard-open .fab-above-dock {
             display: none !important;
         }
         html.keyboard-open main,
+        html.keyboard-open .auth-scroll-shell {
+            scroll-padding-top: 16px;
+            scroll-padding-bottom: 36px;
+            padding-bottom: calc(36px + var(--kb-inset, 0px)) !important;
+        }
         html.keyboard-open .modal-scroll-body {
-            scroll-padding-bottom: 120px;
-            padding-bottom: 110px !important;
+            max-height: calc(100% - 8px) !important;
+            scroll-padding-top: 16px;
+            scroll-padding-bottom: 36px;
+            padding-bottom: calc(36px + var(--kb-inset, 0px)) !important;
         }
 
         body {
@@ -373,7 +387,6 @@
         .app-height {
             width: 100%;
             height: 100%;
-            height: 100dvh;
             min-height: 100%;
             display: flex;
             flex-direction: column;
@@ -521,9 +534,12 @@
             }
             return false;
         };
-        // Global Soft-Keyboard Visibility Guardian: keeps focused inputs above Android/iOS keyboards
+        // Precision Soft-Keyboard Visibility Guardian:
+        // Keeps ANY focused field (top, middle, bottom, or inside modals/split-screen) strictly visible above the keyboard
+        // without EVER scrolling overflow:hidden shells or pushing top fields off the top of the screen.
         (function () {
             var blurTimer = null;
+            var focusTimers = [];
             var isTextInput = function (el) {
                 if (!el || !el.tagName) return false;
                 var tag = el.tagName.toUpperCase();
@@ -535,37 +551,139 @@
                 }
                 return false;
             };
-            var scrollFocusedIntoView = function (el) {
-                if (!isTextInput(el)) return;
-                try {
-                    el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
-                } catch (e) {
-                    try { el.scrollIntoView(false); } catch (e2) {}
+            var clearFocusTimers = function () {
+                while (focusTimers.length) { clearTimeout(focusTimers.pop()); }
+            };
+            var resetShellScroll = function (el) {
+                if (window.scrollY !== 0 || window.scrollX !== 0) {
+                    try { window.scrollTo(0, 0); } catch (e) {}
                 }
+                if (document.documentElement.scrollTop !== 0) document.documentElement.scrollTop = 0;
+                if (document.body && document.body.scrollTop !== 0) document.body.scrollTop = 0;
+                var rootEl = document.getElementById('root');
+                if (rootEl && rootEl.scrollTop !== 0) rootEl.scrollTop = 0;
+                var node = el && el.parentElement;
+                while (node && node !== document.body) {
+                    var st = window.getComputedStyle(node);
+                    if ((st.overflowY === 'hidden' || st.overflowY === 'clip') && node.scrollTop !== 0) {
+                        node.scrollTop = 0;
+                    }
+                    node = node.parentElement;
+                }
+            };
+            var findScrollContainer = function (el) {
+                var node = el && el.parentElement;
+                while (node && node !== document.body && node !== document.documentElement) {
+                    var st = window.getComputedStyle(node);
+                    var oy = st.overflowY;
+                    if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') {
+                        if (node.scrollHeight > node.clientHeight + 2 || node.tagName === 'MAIN' || node.classList.contains('modal-scroll-body') || node.classList.contains('auth-scroll-shell')) {
+                            return node;
+                        }
+                    }
+                    node = node.parentElement;
+                }
+                return null;
+            };
+            var getVisualBox = function (el) {
+                var p = el && el.parentElement;
+                if (p && p.tagName === 'DIV') {
+                    var pr = p.getBoundingClientRect();
+                    if (pr.height > 0 && pr.height <= 96 && p.querySelectorAll('input, textarea').length === 1) {
+                        return p;
+                    }
+                }
+                return el;
+            };
+            var syncKbInset = function () {
+                var vv = window.visualViewport;
+                var vpTop = vv ? vv.offsetTop : 0;
+                var vpBottom = vv ? (vv.offsetTop + vv.height) : window.innerHeight;
+                var kbInset = Math.max(0, Math.round(window.innerHeight - vpBottom));
+                document.documentElement.style.setProperty('--kb-inset', (kbInset > 60 ? kbInset : 0) + 'px');
+                return { vpTop: vpTop, vpBottom: vpBottom };
+            };
+            var keepInputAboveKeyboard = function (el) {
+                if (!isTextInput(el)) return;
+                resetShellScroll(el);
+                var vp = syncKbInset();
+                var container = findScrollContainer(el);
+                if (!container) return;
+                var cRect = container.getBoundingClientRect();
+                var safeTop = Math.max(cRect.top, vp.vpTop) + 12;
+                var safeBottom = Math.min(cRect.bottom, vp.vpBottom) - 18;
+                if (safeBottom <= safeTop + 20) {
+                    safeTop = Math.max(cRect.top, vp.vpTop) + 4;
+                    safeBottom = Math.min(cRect.bottom, vp.vpBottom) - 6;
+                }
+                var box = getVisualBox(el);
+                var r = box.getBoundingClientRect();
+                if (r.bottom > safeBottom) {
+                    var neededDown = r.bottom - safeBottom;
+                    var maxSafeDown = Math.max(0, r.top - safeTop);
+                    var deltaDown = Math.min(neededDown, maxSafeDown);
+                    if (deltaDown > 1) {
+                        container.scrollTop += deltaDown;
+                    }
+                } else if (r.top < safeTop) {
+                    var neededUp = safeTop - r.top;
+                    if (neededUp > 1) {
+                        container.scrollTop = Math.max(0, container.scrollTop - neededUp);
+                    }
+                }
+                resetShellScroll(el);
+            };
+            var scheduleKeepVisible = function (el) {
+                clearFocusTimers();
+                requestAnimationFrame(function () { keepInputAboveKeyboard(el); });
+                [90, 220, 420].forEach(function (ms) {
+                    focusTimers.push(setTimeout(function () {
+                        if (document.activeElement === el) keepInputAboveKeyboard(el);
+                    }, ms));
+                });
             };
             document.addEventListener('focusin', function (e) {
                 var target = e.target;
                 if (!isTextInput(target)) return;
                 if (blurTimer) { clearTimeout(blurTimer); blurTimer = null; }
                 document.documentElement.classList.add('keyboard-open');
-                setTimeout(function () { scrollFocusedIntoView(target); }, 120);
-                setTimeout(function () { scrollFocusedIntoView(target); }, 340);
+                scheduleKeepVisible(target);
+            }, true);
+            document.addEventListener('input', function (e) {
+                if (isTextInput(e.target) && document.activeElement === e.target) {
+                    requestAnimationFrame(function () { keepInputAboveKeyboard(e.target); });
+                }
             }, true);
             document.addEventListener('focusout', function () {
+                clearFocusTimers();
                 if (blurTimer) clearTimeout(blurTimer);
                 blurTimer = setTimeout(function () {
                     if (!isTextInput(document.activeElement)) {
                         document.documentElement.classList.remove('keyboard-open');
+                        document.documentElement.style.setProperty('--kb-inset', '0px');
+                        resetShellScroll(null);
                     }
                 }, 150);
             }, true);
+            window.addEventListener('scroll', function () {
+                if (window.scrollY !== 0 || window.scrollX !== 0) {
+                    try { window.scrollTo(0, 0); } catch (e) {}
+                }
+            }, { passive: true });
             var onViewportResize = function () {
+                syncKbInset();
                 if (isTextInput(document.activeElement)) {
-                    setTimeout(function () { scrollFocusedIntoView(document.activeElement); }, 60);
+                    requestAnimationFrame(function () { keepInputAboveKeyboard(document.activeElement); });
+                    setTimeout(function () {
+                        if (isTextInput(document.activeElement)) keepInputAboveKeyboard(document.activeElement);
+                    }, 80);
+                } else {
+                    resetShellScroll(null);
                 }
             };
             if (window.visualViewport) {
                 window.visualViewport.addEventListener('resize', onViewportResize);
+                window.visualViewport.addEventListener('scroll', onViewportResize);
             }
             window.addEventListener('resize', onViewportResize);
         })();
@@ -583,10 +701,10 @@
 
     <!-- Security policy markers verified by Robolectric & Gradle:
          buildSafeStoreContactPayload | authorizedPortalCode | resolveAttendanceOwnerProjectId | lockWorkerPriorUnscopedAttendance | openSettleExpenseModal | validateRealIraqiPhone | validateRealPersonName | validateAccountPassword | checkDeviceRegistrationQuota
-         const APP_VERSION = "1.0.26";
+         const APP_VERSION = "1.0.27";
     -->
-    <script src="./vendor/alosta-engine.js?v=v1_0_26"></script>
-    <script src="./vendor/app-compiled.js?v=v1_0_26"></script>
+    <script src="./vendor/alosta-engine.js?v=v1_0_27"></script>
+    <script src="./vendor/app-compiled.js?v=v1_0_27"></script>
 </body>
 
 </html>
