@@ -419,7 +419,7 @@
             if (!pCoords || !isFinite(pCoords.lat) || !isFinite(pCoords.lng)) continue;
             const radius = Math.max(20, parseInt(p.radius, 10) || 150);
             const rawDist = haversineMeters(lat, lng, pCoords.lat, pCoords.lng);
-            const accBuffer = Math.min(Math.max(0, acc), 120);
+            const accBuffer = Math.min(Math.max(0, acc), 45);
             const effectiveDist = Math.max(0, rawDist - accBuffer);
             const inBounds = effectiveDist <= radius;
             const isAssigned = Boolean(workerId && Array.isArray(p.workerIds) && p.workerIds.includes(workerId));

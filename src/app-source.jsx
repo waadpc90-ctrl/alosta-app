@@ -3,7 +3,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.27";
+        const APP_VERSION = "1.0.28";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -6899,12 +6899,13 @@
                         const gpsTargetProjId = primary.inLoc
                             ? resolveAttendanceOwnerProjectId(primary, data.projects)
                             : (resolveWorkerLiveGpsProjectId(workerId, selectedDate) || primary.projectId || resolveNewAttendanceProjectId(workerId, selectedDate));
-                        if (primary.status === status && primary.projectId === gpsTargetProjId) {
+                        if (primary.status === status && primary.projectId === gpsTargetProjId && (status === 'absent' || primary.timeIn)) {
                             addToast(lang === 'ar' ? 'تم تثبيت حالة حضور هذا اليوم مسبقاً (بدون تكرار الأجر) ✓' : 'Attendance already recorded for this day ✓');
                         } else {
                             await db.collection('attendance').doc(primary.id).update({
                                 status,
                                 projectId: gpsTargetProjId,
+                                timeIn: status !== 'absent' ? (primary.timeIn || Date.now()) : null,
                                 settled: false
                             });
                         }
@@ -6969,10 +6970,11 @@
                                     batch.delete(db.collection('attendance').doc(dup.id));
                                 }
                             }
-                            if (primary.status !== 'full') {
+                            if (primary.status !== 'full' || !primary.timeIn) {
                                 batch.update(db.collection('attendance').doc(primary.id), {
                                     status: 'full',
                                     projectId: primary.projectId || resolveNewAttendanceProjectId(w.id),
+                                    timeIn: primary.timeIn || nowTs,
                                     settled: false
                                 });
                                 addedCount++;
@@ -12873,20 +12875,40 @@
                 const displaySiteCoords = displayEntry?.coords || extractCoords(displayProj?.location);
                 const displayRadius = displayEntry?.radius || (parseInt(displayProj?.radius) || 150);
 
-                if (!displaySiteCoords) {
+                // Resolve active shift project independently of display dropdown so departure alerts NEVER get bypassed
+                const trackedShiftProj = shiftProject || displayProj;
+                const trackedEntry = trackedShiftProj?.id ? (scan.byId[trackedShiftProj.id] || null) : null;
+                const trackedCoords = trackedEntry?.coords || extractCoords(trackedShiftProj?.location);
+                const shiftRad = trackedEntry?.radius || (parseInt(trackedShiftProj?.radius) || 150);
+
+                if (!displaySiteCoords && !trackedCoords) {
                     setLiveGps({ coords, rawDist: null, effectiveDist: null, inBounds: true, error: null, updatedAt: nowMs });
                     return { coords, rawDist: null, effectiveDist: null, inBounds: true, scan };
                 }
 
-                const rawDist = displayEntry ? displayEntry.rawDist : calcDistance(coords.lat, coords.lng, displaySiteCoords.lat, displaySiteCoords.lng);
-                const effectiveDist = displayEntry ? displayEntry.effectiveDist : calcEffectiveDistance(coords.lat, coords.lng, displaySiteCoords.lat, displaySiteCoords.lng, coords.acc);
+                const rawDist = displaySiteCoords
+                    ? (displayEntry ? displayEntry.rawDist : calcDistance(coords.lat, coords.lng, displaySiteCoords.lat, displaySiteCoords.lng))
+                    : null;
+                const effectiveDist = displaySiteCoords
+                    ? (displayEntry ? displayEntry.effectiveDist : calcEffectiveDistance(coords.lat, coords.lng, displaySiteCoords.lat, displaySiteCoords.lng, coords.acc))
+                    : null;
+
+                const shiftRawDist = trackedCoords
+                    ? (trackedEntry ? trackedEntry.rawDist : calcDistance(coords.lat, coords.lng, trackedCoords.lat, trackedCoords.lng))
+                    : rawDist;
+                const shiftEffDist = trackedCoords
+                    ? (trackedEntry ? trackedEntry.effectiveDist : calcEffectiveDistance(coords.lat, coords.lng, trackedCoords.lat, trackedCoords.lng, coords.acc))
+                    : effectiveDist;
 
                 // Ignore extremely coarse cell-tower jumps (>90m accuracy) unless undeniably far outside
-                if (triggerAlertIfOut && coords.acc > 90 && (rawDist - coords.acc) <= (displayRadius + 120)) {
+                const glitchRefDist = trackedCoords ? shiftRawDist : rawDist;
+                const glitchRefRad = trackedCoords ? shiftRad : displayRadius;
+                if (triggerAlertIfOut && coords.acc > 90 && glitchRefDist !== null && (glitchRefDist - coords.acc) <= (glitchRefRad + 120)) {
                     return { coords, rawDist, effectiveDist, inBounds: true, ignoredLowAccuracy: true, scan };
                 }
 
-                const inBounds = effectiveDist <= displayRadius;
+                const inBounds = displaySiteCoords ? (effectiveDist <= displayRadius) : true;
+                const shiftInBounds = trackedCoords ? (shiftEffDist <= shiftRad) : inBounds;
                 setLiveGps({ coords, rawDist, effectiveDist, inBounds, error: null, updatedAt: nowMs });
 
                 // Broadcast worker's GPS-matched site to telemetry (throttled: only when matched site changes or every 10 min)
@@ -12933,16 +12955,8 @@
                     }
                 }
 
-                // Evaluate shift departure strictly against the worker's ACTIVE shift project (or any assigned site they moved into)
-                const trackedShiftProj = shiftProject || displayProj;
-                const trackedEntry = trackedShiftProj?.id ? (scan.byId[trackedShiftProj.id] || null) : null;
-                const shiftInBounds = trackedEntry ? trackedEntry.inBounds : inBounds;
-                const shiftRawDist = trackedEntry ? trackedEntry.rawDist : rawDist;
-                const shiftEffDist = trackedEntry ? trackedEntry.effectiveDist : effectiveDist;
-                const shiftRad = trackedEntry ? trackedEntry.radius : displayRadius;
-                const insideAnyAssignedSite = Boolean(shiftInBounds || (scan.matched && scan.matched.isAssigned));
-
-                if (insideAnyAssignedSite) {
+                // Evaluate shift departure strictly against the worker's ACTIVE shift project
+                if (shiftInBounds) {
                     outOfBoundsStreakRef.current = { count: 0, lastAt: 0 };
                     setLeftSiteWarning(null);
                     if (insideSiteSinceRef.current === 0) {
@@ -12951,7 +12965,7 @@
                         const alertKey = `${tA.id}_${todayStr()}`;
                         delete outOfBoundsAlertSentRef.current[alertKey];
                     }
-                } else if (triggerAlertIfOut && tA && tA.timeIn && !tA.timeOut && trackedEntry) {
+                } else if (triggerAlertIfOut && tA && tA.timeIn && !tA.timeOut && trackedCoords) {
                     insideSiteSinceRef.current = 0;
                     const streak = outOfBoundsStreakRef.current;
                     const hasTimeGap = streak.lastAt > 0 && (nowMs - streak.lastAt) >= 5000;
@@ -12961,7 +12975,7 @@
                         outOfBoundsStreakRef.current = { count: streak.count + 1, lastAt: nowMs };
                     }
 
-                    const highConfidenceFarExit = coords.acc <= 35 && shiftEffDist > (shiftRad + 80);
+                    const highConfidenceFarExit = coords.acc <= 50 && shiftEffDist > (shiftRad + 80);
                     const confirmedDeparture = highConfidenceFarExit || (streak.count >= 1 && hasTimeGap);
 
                     if (!confirmedDeparture) {
@@ -13116,13 +13130,16 @@
                 } catch (e) {}
             }, [isWorkerShiftRunning, workerSyncing, tA?.id, tA?.timeIn, tA?.date, tA?.steps, tA?.activeMinutes, activeProject?.adminId, lW.id, lW.specialty, lW.adminId]);
 
+            const evaluateWorkerPositionRef = useRef(evaluateWorkerPosition);
+            evaluateWorkerPositionRef.current = evaluateWorkerPosition;
+
             useEffect(() => {
                 let watchId = null;
                 let intervalId = null;
 
                 const pollGps = () => {
                     requestGeolocation({ enableHighAccuracy: true, maximumAge: 0, forceFresh: isWorkerShiftRunning, timeout: 9000 })
-                        .then(pos => evaluateWorkerPosition(pos, true))
+                        .then(pos => evaluateWorkerPositionRef.current(pos, true))
                         .catch(() => { });
                 };
 
@@ -13134,7 +13151,7 @@
                     if (navigator.geolocation && navigator.geolocation.watchPosition) {
                         try {
                             watchId = navigator.geolocation.watchPosition(
-                                pos => evaluateWorkerPosition(pos, true),
+                                pos => evaluateWorkerPositionRef.current(pos, true),
                                 () => { },
                                 { enableHighAccuracy: true, maximumAge: 0, timeout: 12000 }
                             );
@@ -13148,7 +13165,7 @@
                         try { navigator.geolocation.clearWatch(watchId); } catch (e) { }
                     }
                 };
-            }, [activeProject?.id, activeSiteCoords?.lat, activeSiteCoords?.lng, allowedRadius, isWorkerShiftRunning, allProjects.length]);
+            }, [activeProject?.id, activeSiteCoords?.lat, activeSiteCoords?.lng, allowedRadius, isWorkerShiftRunning, tA?.id, tA?.projectId, tA?.timeIn, tA?.timeOut, shiftProject?.id, shiftSiteCoords?.lat, shiftSiteCoords?.lng, shiftAllowedRadius, allProjects.length]);
 
             const unreadCount = (pendingReq ? 1 : 0) + marketRequests.length;
             useAppNotifications(unreadCount, 'نظام أستاذ وعد | الأسطة', lang === 'ar' ? 'لديك إشعارات أو عروض عمل جديدة' : 'You have new notifications or job offers');

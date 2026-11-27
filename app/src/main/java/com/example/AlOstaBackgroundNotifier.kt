@@ -48,7 +48,7 @@ object AlOstaBackgroundNotifier {
     private const val QUICK_FIRST_MAX_LATENCY_MS = 75L * 1000L // Within 75s
     private const val QUICK_CHAIN_MIN_LATENCY_MS = 180L * 1000L // Follow-up checks every 3 min
     private const val QUICK_CHAIN_MAX_LATENCY_MS = 240L * 1000L // Within 4 min
-    private const val MAX_QUICK_CHAIN_STEPS = 5 // Covers first ~16 min rapidly before 15-min periodic takes over
+    private const val MAX_QUICK_CHAIN_STEPS = 10 // Covers first ~30 min rapidly before 15-min periodic takes over
     private const val GLOBAL_CHECK_COOLDOWN_MS = 60L * 60L * 1000L // Check OTA + announcements once per hour
     private const val FRESH_NOTIF_MAX_AGE_MS = 48L * 60L * 60L * 1000L // Never flood ancient (>48h) docs
     private const val MAX_SEEN_IDS = 180

@@ -81,38 +81,48 @@ object AlOstaLocationManager {
         if (current == null || !isValidLocation(current)) return true
 
         val timeDelta = candidate.time - current.time
-        val isSignificantlyNewer = timeDelta > 60_000L
-        val isSignificantlyOlder = timeDelta < -60_000L
+        val isSignificantlyNewer = timeDelta > 45_000L
+        val isSignificantlyOlder = timeDelta < -45_000L
         val isNewer = timeDelta > 0L
 
         val candidateIsGps = candidate.provider == LocationManager.GPS_PROVIDER
         val currentIsGps = current.provider == LocationManager.GPS_PROVIDER
 
-        // If candidate is much newer, still reject extreme coarse jumps (>300m) if current GPS is <2 min old
+        // If candidate is significantly newer (>45s), accept unless it's a wild coarse cell-tower jump (>180m)
         if (isSignificantlyNewer) {
-            if (!candidateIsGps && currentIsGps && timeDelta < 120_000L && candidate.accuracy > max(200f, current.accuracy * 4f)) {
+            if (!candidateIsGps && currentIsGps && timeDelta < 120_000L && candidate.accuracy > max(180f, current.accuracy * 4f)) {
                 return false
             }
             return true
         }
         if (isSignificantlyOlder) return false
 
-        val accDelta = candidate.accuracy - current.accuracy
-        val isMoreAccurate = accDelta < 0f
-        val isSignificantlyLessAccurate = accDelta > 40f
-
-        // Never let a coarse network/passive fix overwrite a recent GPS fix within 60s
-        if (!candidateIsGps && currentIsGps && candidate.accuracy > max(35f, current.accuracy * 1.4f)) {
-            return false
+        // Always accept a newer, accurate GPS fix (<=65m): moving workers naturally fluctuate from 6m to 25-50m
+        if (candidateIsGps && isNewer && candidate.accuracy <= 65f) {
+            return true
         }
 
-        // Strongly prefer a valid GPS fix over a network fix within the 60s window
+        // Accept a newer Wi-Fi/Network fix with solid accuracy (<=65m) once current GPS is >=20s old
+        if (!candidateIsGps && currentIsGps) {
+            if (isNewer && timeDelta >= 20_000L && candidate.accuracy <= 65f) {
+                return true
+            }
+            if (candidate.accuracy > max(35f, current.accuracy * 1.4f)) {
+                return false
+            }
+        }
+
+        // Strongly prefer a valid GPS fix over a network fix within the window
         if (candidateIsGps && !currentIsGps && candidate.accuracy <= 65f) {
             return true
         }
 
+        val accDelta = candidate.accuracy - current.accuracy
+        val isMoreAccurate = accDelta < 0f
+        val isSignificantlyLessAccurate = accDelta > 40f
+
         if (isMoreAccurate) return true
-        if (isNewer && !isSignificantlyLessAccurate && accDelta <= 15f) return true
+        if (isNewer && !isSignificantlyLessAccurate && accDelta <= 25f) return true
         return false
     }
 

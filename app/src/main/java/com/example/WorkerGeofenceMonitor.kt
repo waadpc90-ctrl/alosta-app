@@ -139,7 +139,7 @@ object WorkerGeofenceMonitor {
                 confirmedDeparture = false
             )
         }
-        val highConfidenceFarExit = acc <= 35f && effDist > (radiusMeters + 80)
+        val highConfidenceFarExit = acc <= 50f && effDist > (radiusMeters + 80)
         val confirmed = highConfidenceFarExit || (priorOutCount >= 1 && hasTimeGap)
         return GeofenceEvaluation(
             ignoredLowAccuracy = false,
@@ -287,11 +287,11 @@ object WorkerGeofenceMonitor {
         val cfg = loadConfig(appCtx) ?: return
         val nowMs = System.currentTimeMillis()
 
-        // Ignore stale fixes older than 90s
-        if (loc.time > 0L && (nowMs - loc.time) > 90_000L) return
+        // Ignore stale fixes older than 4 minutes (keeps departure checks working if GPS pauses indoors)
+        if (loc.time > 0L && (nowMs - loc.time) > 240_000L) return
 
         val rawDist = calcDistanceMeters(loc.latitude, loc.longitude, cfg.siteLat, cfg.siteLng)
-        val hasTimeGap = firstOutTimestampMs > 0L && (nowMs - lastOutSampleTimestampMs) >= CONSECUTIVE_MIN_GAP_MS
+        val hasTimeGap = firstOutTimestampMs > 0L && (nowMs - firstOutTimestampMs) >= CONSECUTIVE_MIN_GAP_MS
         val eval = evaluateReading(
             rawDistMeters = rawDist,
             accuracyMeters = loc.accuracy,

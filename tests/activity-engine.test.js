@@ -238,6 +238,17 @@ test('matchWorkerAcrossProjects detects newly added project site and prioritizes
         projects
     );
     assert.equal(manualNoGps, 'proj_new');
+
+    // 6. Departure regression guard: worker ~220m outside 150m site with degraded 90m GPS accuracy MUST be out of bounds
+    // (accBuffer capped at 45m -> effectiveDist ~175m > 150m; previously 120m buffer falsely kept worker inBounds up to 270m!)
+    const leftWithDegradedAcc = ActivityEngine.matchWorkerAcrossProjects(
+        { lat: 33.31720, lng: 44.36610, acc: 90 },
+        projects,
+        { workerId: 'w1', preferredProjectId: 'proj_old' }
+    );
+    assert.equal(leftWithDegradedAcc.byId['proj_old'].inBounds, false, 'Worker 220m away with 90m accuracy must be detected as out-of-bounds');
+    assert.equal(leftWithDegradedAcc.matched, null);
 });
+
 
 
