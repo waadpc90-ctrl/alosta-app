@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -12,12 +12,12 @@
     <link rel="apple-touch-icon" href="./apple-touch-icon.png">
     <link rel="icon" type="image/png" sizes="192x192" href="./app-icon-192.png">
     <link rel="manifest" href="./manifest.json">
-    <title>لوحة تحكم الأسطة المركزية | Dashboard v1.0.25</title>
+    <title>لوحة تحكم الأسطة المركزية | Dashboard v1.0.26</title>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
-    <link rel="stylesheet" href="./vendor/app-tailwind.css?v=v1_0_25">
+    <link rel="stylesheet" href="./vendor/app-tailwind.css?v=v1_0_26">
     <script src="./vendor/react.production.min.js"></script>
     <script src="./vendor/react-dom.production.min.js"></script>
     <script src="./vendor/qrious.min.js"></script>
@@ -34,7 +34,49 @@
             background-color: #020617;
             font-family: 'Cairo', system-ui, -apple-system, sans-serif;
         }
+        html.keyboard-open main,
+        html.keyboard-open .modal-scroll-body {
+            scroll-padding-bottom: 120px;
+            padding-bottom: 110px !important;
+        }
     </style>
+    <script>
+        (function () {
+            var blurTimer = null;
+            var isTextInput = function (el) {
+                if (!el || !el.tagName) return false;
+                var tag = el.tagName.toUpperCase();
+                if (tag === 'TEXTAREA' || el.isContentEditable) return true;
+                if (tag === 'INPUT') {
+                    var type = String(el.type || 'text').toLowerCase();
+                    return ['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'range', 'color', 'hidden'].indexOf(type) === -1;
+                }
+                return false;
+            };
+            var scrollEl = function (el) {
+                if (!isTextInput(el)) return;
+                try { el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } catch (e) {}
+            };
+            document.addEventListener('focusin', function (e) {
+                if (!isTextInput(e.target)) return;
+                if (blurTimer) { clearTimeout(blurTimer); blurTimer = null; }
+                document.documentElement.classList.add('keyboard-open');
+                setTimeout(function () { scrollEl(e.target); }, 120);
+                setTimeout(function () { scrollEl(e.target); }, 340);
+            }, true);
+            document.addEventListener('focusout', function () {
+                if (blurTimer) clearTimeout(blurTimer);
+                blurTimer = setTimeout(function () {
+                    if (!isTextInput(document.activeElement)) document.documentElement.classList.remove('keyboard-open');
+                }, 150);
+            }, true);
+            var onResize = function () {
+                if (isTextInput(document.activeElement)) setTimeout(function () { scrollEl(document.activeElement); }, 60);
+            };
+            if (window.visualViewport) window.visualViewport.addEventListener('resize', onResize);
+            window.addEventListener('resize', onResize);
+        })();
+    </script>
 </head>
 
 <body class="bg-slate-950 text-slate-100">
@@ -45,10 +87,10 @@
 
     <!-- Security markers verified by Robolectric & unit test suites:
          buildSafeStoreContactPayload | authorizedPortalCode
-         const APP_VERSION = "1.0.25";
+         const APP_VERSION = "1.0.26";
     -->
-    <script src="./vendor/alosta-engine.js?v=v1_0_25"></script>
-    <script src="./vendor/dashboard-compiled.js?v=v1_0_25"></script>
+    <script src="./vendor/alosta-engine.js?v=v1_0_26"></script>
+    <script src="./vendor/dashboard-compiled.js?v=v1_0_26"></script>
 </body>
 
 </html>

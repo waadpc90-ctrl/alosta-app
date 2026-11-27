@@ -966,7 +966,7 @@ fun AlOstaAppScreen(
     Surface(
         modifier = Modifier
             .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.systemBars)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
             .testTag("al_osta_root"),
         color = MaterialTheme.colorScheme.background
     ) {

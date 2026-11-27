@@ -191,3 +191,53 @@ test('Biomechanical MET energy, shift-duration cap on activeMinutes, and distanc
     assert.equal(ActivityEngine.computeShiftElapsedMinutes({ timeIn: t0, timeOut: t0 + 120 * 60_000 }, t0 + 300 * 60_000), 120);
 });
 
+test('matchWorkerAcrossProjects detects newly added project site and prioritizes assigned sites', () => {
+    const projects = [
+        { id: 'proj_old', title: 'مشروع المنصور', location: '33.31520, 44.36610', radius: 150, workerIds: ['w1'] },
+        { id: 'proj_new', title: 'مشروع الكرادة الجديد', location: '33.29800, 44.42200', radius: 150, workerIds: ['w1'] },
+        { id: 'proj_other', title: 'مشروع غير مسند', location: '33.29805, 44.42205', radius: 150, workerIds: ['w99'] }
+    ];
+
+    // 1. Worker is physically standing at the newly added project (proj_new) while old project was preferred
+    const atNewSite = ActivityEngine.matchWorkerAcrossProjects(
+        { lat: 33.29802, lng: 44.42202, acc: 12 },
+        projects,
+        { workerId: 'w1', preferredProjectId: 'proj_old' }
+    );
+    assert.ok(atNewSite.matched, 'Worker must match a project site');
+    assert.equal(atNewSite.matched.project.id, 'proj_new', 'Must select newly added assigned site over unassigned overlap & far old site');
+    assert.equal(atNewSite.byId['proj_old'].inBounds, false);
+    assert.equal(atNewSite.byId['proj_new'].inBounds, true);
+
+    // 2. Worker is outside ALL sites -> matched is null, nearest returns closest project
+    const farAway = ActivityEngine.matchWorkerAcrossProjects(
+        { lat: 33.35000, lng: 44.36610, acc: 15 },
+        projects,
+        { workerId: 'w1', preferredProjectId: 'proj_new' }
+    );
+    assert.equal(farAway.matched, null);
+    assert.equal(farAway.nearest.project.id, 'proj_old', 'Nearest site should be proj_old');
+
+    // 3. Daily wage attribution routes to GPS-matched site even if legacy/manual projectId pointed to old site
+    const billedToNew = ActivityEngine.resolveAttendanceProjectByLocation(
+        { workerId: 'w1', projectId: 'proj_old', inLoc: { lat: 33.29802, lng: 44.42202, acc: 10 } },
+        projects
+    );
+    assert.equal(billedToNew, 'proj_new', 'Worker daily wage must go to the project site where worker physically clocked in');
+
+    // 4. Unscoped attendance with GPS routes to exact physical site
+    const unscopedGps = ActivityEngine.resolveAttendanceProjectByLocation(
+        { workerId: 'w1', inLoc: { lat: 33.31521, lng: 44.36611, acc: 12 } },
+        projects
+    );
+    assert.equal(unscopedGps, 'proj_old');
+
+    // 5. Manual attendance with no GPS keeps explicit projectId
+    const manualNoGps = ActivityEngine.resolveAttendanceProjectByLocation(
+        { workerId: 'w1', projectId: 'proj_new' },
+        projects
+    );
+    assert.equal(manualNoGps, 'proj_new');
+});
+
+

@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-touch-fullscreen" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
@@ -94,7 +94,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
-    <link rel="stylesheet" href="./vendor/app-tailwind.css?v=v1_0_25">
+    <link rel="stylesheet" href="./vendor/app-tailwind.css?v=v1_0_26">
     <script src="./vendor/react.production.min.js"></script>
     <script src="./vendor/react-dom.production.min.js"></script>
     <script src="./vendor/qrious.min.js"></script>
@@ -126,7 +126,7 @@
             background-color: #070b14;
         }
 
-        /* Fix WebKit iOS Standalone PWA bug where 100dvh shrinks by ~44-60px and lifts bottom nav bar */
+        /* Fix WebKit iOS Standalone PWA bug where 100dvh shrinks by ~44-60px and lifts bottom nav bar (scoped strictly to iOS so Android keyboard resize works cleanly) */
         html.ios-standalone,
         html.ios-standalone body,
         html.ios-standalone #root,
@@ -136,12 +136,14 @@
             min-height: 100vh !important;
             min-height: -webkit-fill-available !important;
         }
-        @media all and (display-mode: standalone) {
-            html, body, #root, .app-height {
-                height: 100vh !important;
-                height: 100lvh !important;
-                min-height: 100vh !important;
-            }
+        /* Keep bottom inputs & modals cleanly visible above the on-screen keyboard */
+        html.keyboard-open .nav-dock-wrapper {
+            display: none !important;
+        }
+        html.keyboard-open main,
+        html.keyboard-open .modal-scroll-body {
+            scroll-padding-bottom: 120px;
+            padding-bottom: 110px !important;
         }
 
         body {
@@ -519,6 +521,54 @@
             }
             return false;
         };
+        // Global Soft-Keyboard Visibility Guardian: keeps focused inputs above Android/iOS keyboards
+        (function () {
+            var blurTimer = null;
+            var isTextInput = function (el) {
+                if (!el || !el.tagName) return false;
+                var tag = el.tagName.toUpperCase();
+                if (tag === 'TEXTAREA') return true;
+                if (el.isContentEditable) return true;
+                if (tag === 'INPUT') {
+                    var type = String(el.type || 'text').toLowerCase();
+                    return ['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'range', 'color', 'hidden'].indexOf(type) === -1;
+                }
+                return false;
+            };
+            var scrollFocusedIntoView = function (el) {
+                if (!isTextInput(el)) return;
+                try {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+                } catch (e) {
+                    try { el.scrollIntoView(false); } catch (e2) {}
+                }
+            };
+            document.addEventListener('focusin', function (e) {
+                var target = e.target;
+                if (!isTextInput(target)) return;
+                if (blurTimer) { clearTimeout(blurTimer); blurTimer = null; }
+                document.documentElement.classList.add('keyboard-open');
+                setTimeout(function () { scrollFocusedIntoView(target); }, 120);
+                setTimeout(function () { scrollFocusedIntoView(target); }, 340);
+            }, true);
+            document.addEventListener('focusout', function () {
+                if (blurTimer) clearTimeout(blurTimer);
+                blurTimer = setTimeout(function () {
+                    if (!isTextInput(document.activeElement)) {
+                        document.documentElement.classList.remove('keyboard-open');
+                    }
+                }, 150);
+            }, true);
+            var onViewportResize = function () {
+                if (isTextInput(document.activeElement)) {
+                    setTimeout(function () { scrollFocusedIntoView(document.activeElement); }, 60);
+                }
+            };
+            if (window.visualViewport) {
+                window.visualViewport.addEventListener('resize', onViewportResize);
+            }
+            window.addEventListener('resize', onViewportResize);
+        })();
     </script>
 </head>
 
@@ -533,10 +583,10 @@
 
     <!-- Security policy markers verified by Robolectric & Gradle:
          buildSafeStoreContactPayload | authorizedPortalCode | resolveAttendanceOwnerProjectId | lockWorkerPriorUnscopedAttendance | openSettleExpenseModal | validateRealIraqiPhone | validateRealPersonName | validateAccountPassword | checkDeviceRegistrationQuota
-         const APP_VERSION = "1.0.25";
+         const APP_VERSION = "1.0.26";
     -->
-    <script src="./vendor/alosta-engine.js?v=v1_0_25"></script>
-    <script src="./vendor/app-compiled.js?v=v1_0_25"></script>
+    <script src="./vendor/alosta-engine.js?v=v1_0_26"></script>
+    <script src="./vendor/app-compiled.js?v=v1_0_26"></script>
 </body>
 
 </html>

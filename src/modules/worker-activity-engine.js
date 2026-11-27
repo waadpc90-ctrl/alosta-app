@@ -367,6 +367,113 @@
         return counts;
     };
 
+    const haversineMeters = (lat1, lng1, lat2, lng2) => {
+        const R = 6371000;
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLng = (lng2 - lng1) * Math.PI / 180;
+        const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+    };
+
+    const parseProjectCoords = (loc) => {
+        if (!loc) return null;
+        if (typeof loc === 'object' && typeof loc.lat === 'number' && typeof loc.lng === 'number' && isFinite(loc.lat) && isFinite(loc.lng)) {
+            return { lat: loc.lat, lng: loc.lng };
+        }
+        const raw = String(loc).trim();
+        const patterns = [
+            /@(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)/,
+            /[?&](?:q|ll|query|center|destination|daddr)=(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)/i,
+            /(-?\d{1,2}\.\d{3,})\s*,\s*(-?\d{1,3}\.\d{3,})/
+        ];
+        for (let i = 0; i < patterns.length; i++) {
+            const m = raw.match(patterns[i]);
+            if (m) {
+                const lat = parseFloat(m[1]);
+                const lng = parseFloat(m[2]);
+                if (isFinite(lat) && isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+                    return { lat, lng };
+                }
+            }
+        }
+        return null;
+    };
+
+    const matchWorkerAcrossProjects = (coords, projects = [], options = {}) => {
+        const result = { matched: null, nearest: null, evaluated: [], byId: {} };
+        if (!coords || !isFinite(Number(coords.lat)) || !isFinite(Number(coords.lng))) return result;
+        const lat = Number(coords.lat);
+        const lng = Number(coords.lng);
+        const acc = Math.max(0, Number(coords.acc) || 0);
+        const workerId = String(options.workerId || '').trim();
+        const preferredProjectId = String(options.preferredProjectId || '').trim();
+        const extractFn = typeof options.extractCoordsFn === 'function' ? options.extractCoordsFn : parseProjectCoords;
+
+        const evaluated = [];
+        for (let i = 0; i < (projects || []).length; i++) {
+            const p = projects[i];
+            if (!p || !p.id) continue;
+            const pCoords = extractFn(p.location);
+            if (!pCoords || !isFinite(pCoords.lat) || !isFinite(pCoords.lng)) continue;
+            const radius = Math.max(20, parseInt(p.radius, 10) || 150);
+            const rawDist = haversineMeters(lat, lng, pCoords.lat, pCoords.lng);
+            const accBuffer = Math.min(Math.max(0, acc), 120);
+            const effectiveDist = Math.max(0, rawDist - accBuffer);
+            const inBounds = effectiveDist <= radius;
+            const isAssigned = Boolean(workerId && Array.isArray(p.workerIds) && p.workerIds.includes(workerId));
+            const entry = { project: p, coords: pCoords, radius, rawDist, effectiveDist, inBounds, isAssigned };
+            evaluated.push(entry);
+            result.byId[p.id] = entry;
+        }
+
+        if (evaluated.length === 0) return result;
+
+        evaluated.sort((a, b) => {
+            if (a.inBounds !== b.inBounds) return a.inBounds ? -1 : 1;
+            if (a.isAssigned !== b.isAssigned) return a.isAssigned ? -1 : 1;
+            if (a.effectiveDist !== b.effectiveDist) return a.effectiveDist - b.effectiveDist;
+            return a.rawDist - b.rawDist;
+        });
+
+        result.evaluated = evaluated;
+        const inBoundsList = evaluated.filter(e => e.inBounds);
+        if (inBoundsList.length > 0) {
+            const prefMatch = preferredProjectId ? inBoundsList.find(e => e.project.id === preferredProjectId) : null;
+            result.matched = (prefMatch && (!inBoundsList[0].isAssigned || prefMatch.isAssigned)) ? prefMatch : inBoundsList[0];
+        }
+        const byDistance = evaluated.slice().sort((a, b) => a.rawDist - b.rawDist);
+        result.nearest = byDistance[0] || null;
+        return result;
+    };
+
+    const resolveAttendanceProjectByLocation = (att, projects = [], options = {}) => {
+        if (!att) return null;
+        const projs = Array.isArray(projects) ? projects : [];
+        const coords = att.inLoc || options.liveCoords || null;
+        if (coords && att.manualProjectOverride !== true) {
+            const scan = matchWorkerAcrossProjects(coords, projs, {
+                workerId: att.workerId || options.workerId || '',
+                preferredProjectId: att.projectId || '',
+                extractCoordsFn: options.extractCoordsFn
+            });
+            if (scan.matched && scan.matched.project && scan.matched.project.id) {
+                const currentEntry = att.projectId ? scan.byId[att.projectId] : null;
+                if (!att.projectId || (currentEntry && !currentEntry.inBounds)) {
+                    return scan.matched.project.id;
+                }
+                if (currentEntry && currentEntry.inBounds) {
+                    return att.projectId;
+                }
+                if (att.inLoc && !currentEntry) {
+                    return scan.matched.project.id;
+                }
+            }
+        }
+        return att.projectId || null;
+    };
+
     const api = {
         HEARTBEAT_OFFLINE_MS,
         MOTION_IDLE_MS,
@@ -377,7 +484,9 @@
         computeShiftElapsedMinutes,
         computeEffortMetrics,
         classifyWorkerLiveStatus,
-        summarizeCrewActivity
+        summarizeCrewActivity,
+        matchWorkerAcrossProjects,
+        resolveAttendanceProjectByLocation
     };
 
     if (typeof module !== 'undefined' && module.exports) {

@@ -1,6 +1,6 @@
-const CACHE_NAME = 'alosta-pwa-v1.0.25';
+const CACHE_NAME = 'alosta-pwa-v1.0.26';
 const CORE_SHELL = [
-  './vendor/app-tailwind.css?v=v1_0_25',
+  './vendor/app-tailwind.css?v=v1_0_26',
   './vendor/react.production.min.js',
   './vendor/react-dom.production.min.js',
   './vendor/qrious.min.js',
@@ -8,8 +8,8 @@ const CORE_SHELL = [
   './vendor/firebase-auth.js',
   './vendor/firebase-firestore.js',
   './vendor/lucide.min.js',
-  './vendor/alosta-engine.js?v=v1_0_25',
-  './vendor/app-compiled.js?v=v1_0_25',
+  './vendor/alosta-engine.js?v=v1_0_26',
+  './vendor/app-compiled.js?v=v1_0_26',
   './apple-touch-icon.png',
   './app-icon-192.png',
   './app-icon-512.png'

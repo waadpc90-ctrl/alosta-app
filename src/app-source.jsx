@@ -3,7 +3,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.25";
+        const APP_VERSION = "1.0.26";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -1959,7 +1959,7 @@
             if (!isOpen) return null;
             return (
                 <div className={`fixed inset-0 ${zIndexClass} flex items-end sm:items-center justify-center bg-black/70`} onClick={onClose}>
-                    <div className="bg-white dark:bg-slate-800 w-full sm:max-w-md rounded-t-[2.25rem] sm:rounded-[2.25rem] p-5 max-h-[90vh] overflow-y-auto pb-8 shadow-2xl border-t border-slate-200/80 dark:border-slate-700" onClick={e => e.stopPropagation()}>
+                    <div className="modal-scroll-body bg-white dark:bg-slate-800 w-full sm:max-w-md rounded-t-[2.25rem] sm:rounded-[2.25rem] p-5 max-h-[90%] overflow-y-auto pb-8 shadow-2xl border-t border-slate-200/80 dark:border-slate-700" onClick={e => e.stopPropagation()}>
                         <div className="w-12 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full mx-auto mb-3 sm:hidden"></div>
                         <div className="flex justify-between items-center mb-4 border-b dark:border-slate-700 pb-3">
                             <h3 className="font-black text-lg flex items-center gap-2">
@@ -6131,11 +6131,20 @@
                 });
             }, [data.requests, jobApplicants.length, unreadCount, isInitialSyncing, lang]);
 
-            // Deterministic single-project ownership for attendance records so wages never leak to a newly created project
+            // Deterministic GPS-first single-project ownership for attendance records:
+            // Worker's daily wage ALWAYS goes to the project site where the worker physically worked (by GPS),
+            // falling back to explicit projectId or join-time deterministic ownership when no GPS coordinates exist.
             const resolveAttendanceOwnerProjectId = (att, projectsList = data.projects) => {
                 if (!att) return null;
-                if (att.projectId) return att.projectId;
                 const projs = Array.isArray(projectsList) ? projectsList : [];
+                if (att.inLoc && att.manualProjectOverride !== true && window.AlOstaActivityEngine && typeof window.AlOstaActivityEngine.resolveAttendanceProjectByLocation === 'function') {
+                    const gpsOwner = window.AlOstaActivityEngine.resolveAttendanceProjectByLocation(att, projs, {
+                        workerId: att.workerId || '',
+                        extractCoordsFn: extractCoords
+                    });
+                    if (gpsOwner) return gpsOwner;
+                }
+                if (att.projectId) return att.projectId;
                 const workerProjs = projs.filter(p => p && Array.isArray(p.workerIds) && p.workerIds.includes(att.workerId));
                 if (workerProjs.length === 0) return null;
                 if (workerProjs.length === 1) {
@@ -6163,7 +6172,32 @@
                 return sortedOldestFirst[0]?.id || null;
             };
 
-            const resolveNewAttendanceProjectId = (workerId) => {
+            const resolveWorkerLiveGpsProjectId = (workerId, targetDate = selectedDate) => {
+                if (!workerId || targetDate !== todayStr()) return null;
+                const wk = data.workers.find(x => x.id === workerId);
+                if (!wk) return null;
+                const isTodayLoc = wk.liveLocDate === targetDate || wk.todayEffortDate === targetDate;
+                if (isTodayLoc && Number.isFinite(Number(wk.liveLat)) && Number.isFinite(Number(wk.liveLng))) {
+                    if (window.AlOstaActivityEngine && typeof window.AlOstaActivityEngine.matchWorkerAcrossProjects === 'function') {
+                        const scan = window.AlOstaActivityEngine.matchWorkerAcrossProjects(
+                            { lat: Number(wk.liveLat), lng: Number(wk.liveLng), acc: Number(wk.liveAcc) || 20 },
+                            data.projects,
+                            { workerId, preferredProjectId: wk.liveProjectId || '', extractCoordsFn: extractCoords }
+                        );
+                        if (scan.matched?.project?.id) return scan.matched.project.id;
+                    }
+                }
+                if (isTodayLoc && wk.liveProjectId && data.projects.some(p => p.id === wk.liveProjectId)) {
+                    return wk.liveProjectId;
+                }
+                return null;
+            };
+
+            const resolveNewAttendanceProjectId = (workerId, targetDate = selectedDate) => {
+                // 1) If the worker's phone confirmed their physical GPS presence inside one of your projects today,
+                //    bill today's daily wage directly to THAT exact project!
+                const liveGpsProjId = resolveWorkerLiveGpsProjectId(workerId, targetDate);
+                if (liveGpsProjId) return liveGpsProjId;
                 if (selectedProject?.id) return selectedProject.id;
                 if (attProjectId && attProjectId !== '__ALL__') {
                     const chosen = data.projects.find(p => p.id === attProjectId);
@@ -6862,28 +6896,39 @@
                             });
                             await cleanBatch.commit();
                         }
-                        if (primary.status === status && (primary.projectId || !resolveNewAttendanceProjectId(workerId))) {
+                        const gpsTargetProjId = primary.inLoc
+                            ? resolveAttendanceOwnerProjectId(primary, data.projects)
+                            : (resolveWorkerLiveGpsProjectId(workerId, selectedDate) || primary.projectId || resolveNewAttendanceProjectId(workerId, selectedDate));
+                        if (primary.status === status && primary.projectId === gpsTargetProjId) {
                             addToast(lang === 'ar' ? 'تم تثبيت حالة حضور هذا اليوم مسبقاً (بدون تكرار الأجر) ✓' : 'Attendance already recorded for this day ✓');
                         } else {
-                            const resolvedProjId = primary.projectId || resolveNewAttendanceProjectId(workerId);
                             await db.collection('attendance').doc(primary.id).update({
                                 status,
-                                projectId: resolvedProjId,
+                                projectId: gpsTargetProjId,
                                 settled: false
                             });
                         }
                     } else {
+                        const targetProjId = resolveNewAttendanceProjectId(workerId, selectedDate);
+                        const liveMatched = resolveWorkerLiveGpsProjectId(workerId, selectedDate);
+                        const targetProjObj = data.projects.find(p => p.id === targetProjId);
                         await db.collection('attendance').add({
                             date: selectedDate,
                             workerId,
                             status,
                             adminId,
-                            projectId: resolveNewAttendanceProjectId(workerId),
+                            projectId: targetProjId,
+                            projectTitle: targetProjObj?.title || '',
                             timeIn: status !== 'absent' ? Date.now() : null,
                             timeOut: null,
-                            inStatus: 'manual',
+                            inStatus: liveMatched ? 'valid' : 'manual',
                             settled: false
                         });
+                        if (liveMatched && targetProjObj && status !== 'absent') {
+                            addToast(lang === 'ar'
+                                ? `📍 تم احتساب اليومية على مشروع «${targetProjObj.title}» حسب موقع العامل`
+                                : `📍 Daily wage assigned to "${targetProjObj.title}" by worker GPS`);
+                        }
                     }
                 } catch (err) {
                     addToast('Error');
@@ -6995,8 +7040,21 @@
                         batch.update(db.collection('notifications').doc(extraReq.id), { status: 'approved', adminInboxKey: '' });
                     }
 
-                    // Check in-memory attendance snapshot (zero redundant .get() N+1 call)
+                    // Resolve the exact physical project site from the worker's GPS check-in coordinates so daily wage goes to THAT project!
+                    let gpsMatchedProjId = null;
+                    if (r.inLoc && window.AlOstaActivityEngine && typeof window.AlOstaActivityEngine.matchWorkerAcrossProjects === 'function') {
+                        const gpsScan = window.AlOstaActivityEngine.matchWorkerAcrossProjects(r.inLoc, data.projects, {
+                            workerId: r.workerId || '',
+                            preferredProjectId: r.projectId || '',
+                            extractCoordsFn: extractCoords
+                        });
+                        if (gpsScan.matched?.project?.id) {
+                            gpsMatchedProjId = gpsScan.matched.project.id;
+                        }
+                    }
                     const existingDocs = data.attendance.filter(a => a.workerId === r.workerId && a.date === targetDate);
+                    const finalProjId = gpsMatchedProjId || r.projectId || existingDocs[0]?.projectId || resolveNewAttendanceProjectId(r.workerId, targetDate) || null;
+                    const finalProjObj = finalProjId ? data.projects.find(p => p.id === finalProjId) : null;
 
                     if (existingDocs.length > 0) {
                         const [primary, ...duplicates] = existingDocs;
@@ -7007,7 +7065,8 @@
                         }
                         batch.update(db.collection('attendance').doc(primary.id), {
                             status: primary.status && primary.status !== 'absent' ? primary.status : 'full',
-                            projectId: r.projectId || primary.projectId || null,
+                            projectId: finalProjId,
+                            projectTitle: finalProjObj?.title || r.projectTitle || primary.projectTitle || '',
                             timeIn: primary.timeIn || r.timeIn || Date.now(),
                             inLoc: r.inLoc || primary.inLoc || null,
                             inStatus: r.inStatus || primary.inStatus || 'valid',
@@ -7017,7 +7076,9 @@
                             stepEngineV2: true
                         });
                         await batch.commit();
-                        addToast(lang === 'ar' ? 'الحضور مسجل مسبقاً لهذا اليوم — تم ربط بصمة الموقع بدون تكرار الأجر ✓' : 'Attendance already recorded for today — merged GPS check-in ✓');
+                        addToast(lang === 'ar'
+                            ? `تم ربط الحضور واحتساب اليومية على مشروع «${finalProjObj?.title || r.projectTitle || 'الموقع'}» حسب الموقع ✓`
+                            : `Attendance merged & billed to "${finalProjObj?.title || 'site'}" by GPS ✓`);
                     } else {
                         const newAttRef = db.collection('attendance').doc();
                         batch.set(newAttRef, {
@@ -7025,7 +7086,8 @@
                             workerId: r.workerId,
                             status: 'full',
                             adminId,
-                            projectId: r.projectId || null,
+                            projectId: finalProjId,
+                            projectTitle: finalProjObj?.title || r.projectTitle || '',
                             timeIn: r.timeIn || Date.now(),
                             inLoc: r.inLoc || null,
                             inStatus: r.inStatus || 'valid',
@@ -7036,7 +7098,9 @@
                             settled: false
                         });
                         await batch.commit();
-                        addToast(lang === 'ar' ? 'تم قبول الحضور ✓' : 'Approved ✓');
+                        addToast(lang === 'ar'
+                            ? `تم قبول الحضور واحتساب اليومية على مشروع «${finalProjObj?.title || r.projectTitle || 'الموقع'}» حسب الموقع ✓`
+                            : `Approved & billed to "${finalProjObj?.title || 'site'}" by GPS ✓`);
                     }
                 } catch (e) {
                     addToast('Error');
@@ -9640,7 +9704,7 @@
                                                                 <span className="text-[10px] text-slate-400 font-bold dir-ltr">{fmtMoney(getOfficialWorkerWage(w), lang)}</span>
                                                                 {recProjObj && (
                                                                     <span className="text-[9.5px] font-black px-2 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-300 border border-indigo-200/70 dark:border-indigo-800">
-                                                                        🏗️ {recProjObj.title}
+                                                                        {r?.inLoc || resolveWorkerLiveGpsProjectId(w.id, selectedDate) === recProjObj.id ? '📍' : '🏗️'} {recProjObj.title}
                                                                     </span>
                                                                 )}
                                                             </div>
@@ -12635,48 +12699,250 @@
                 return Array.from(map.values());
             }, [d.assignedProjs, d.adminProjs]);
 
-            useEffect(() => {
-                if (allProjects.length > 0 && !selectedProjId) {
-                    const withLoc = allProjects.find(p => extractCoords(p.location));
-                    setSelectedProjId((withLoc || allProjects[0]).id);
-                }
-            }, [allProjects, selectedProjId]);
+            // Battery-optimized GPS: single check on load, continuous GPS radio ONLY while actively clocked in on shift
+            const isWorkerShiftRunning = Boolean(tA && tA.date === todayStr() && tA.status !== 'absent' && tA.timeIn && !tA.timeOut);
+            const [projectDistances, setProjectDistances] = useState({});
+            const manualProjPickRef = useRef(false);
+            const lastCoordsRef = useRef(null);
+            const knownProjectIdsRef = useRef(new Set());
 
+            const shiftProject = useMemo(() => {
+                if (!isWorkerShiftRunning || !tA?.projectId) return null;
+                return allProjects.find(p => p.id === tA.projectId) || null;
+            }, [allProjects, isWorkerShiftRunning, tA?.projectId]);
+
+            useEffect(() => {
+                if (!allProjects.length) return;
+                const currentIds = new Set(allProjects.map(p => p.id));
+                const prevIds = knownProjectIdsRef.current;
+                const hasNewProject = prevIds.size > 0 && allProjects.some(p => !prevIds.has(p.id));
+                knownProjectIdsRef.current = currentIds;
+
+                // Ensure selectedProjId stays valid (seed with active shift project or first located project)
+                if (!selectedProjId || !currentIds.has(selectedProjId)) {
+                    const initial = (isWorkerShiftRunning && tA?.projectId && allProjects.find(p => p.id === tA.projectId))
+                        || allProjects.find(p => extractCoords(p.location))
+                        || allProjects[0];
+                    if (initial) setSelectedProjId(initial.id);
+                    return;
+                }
+
+                // When contractor adds a NEW project and assigns this worker to it, immediately re-compare all sites against live GPS!
+                if (hasNewProject && lastCoordsRef.current) {
+                    const scan = matchProjectsByCoords(lastCoordsRef.current, selectedProjId);
+                    setProjectDistances(scan.byId);
+                    if (scan.matched && scan.matched.project.id !== selectedProjId) {
+                        manualProjPickRef.current = false;
+                        setSelectedProjId(scan.matched.project.id);
+                        setLiveGps({
+                            coords: lastCoordsRef.current,
+                            rawDist: scan.matched.rawDist,
+                            effectiveDist: scan.matched.effectiveDist,
+                            inBounds: true,
+                            error: null,
+                            updatedAt: Date.now()
+                        });
+                    }
+                }
+            }, [allProjects, selectedProjId, isWorkerShiftRunning, tA?.projectId]);
+
+            // activeProject ALWAYS honors user's selectedProjId first (never snaps back to old clock-in project!)
             const activeProject = useMemo(() => {
                 if (!allProjects.length) return null;
-                if (tA?.projectId) {
-                    const attProj = allProjects.find(p => p.id === tA.projectId);
-                    if (attProj) return attProj;
+                if (selectedProjId) {
+                    const picked = allProjects.find(p => p.id === selectedProjId);
+                    if (picked) return picked;
                 }
-                return allProjects.find(p => p.id === selectedProjId) || allProjects[0];
-            }, [allProjects, selectedProjId, tA]);
+                if (shiftProject) return shiftProject;
+                return allProjects.find(p => extractCoords(p.location)) || allProjects[0];
+            }, [allProjects, selectedProjId, shiftProject]);
 
             const activeSiteCoords = useMemo(() => extractCoords(activeProject?.location), [activeProject]);
             const allowedRadius = useMemo(() => parseInt(activeProject?.radius) || 150, [activeProject]);
+            const shiftSiteCoords = useMemo(() => extractCoords((shiftProject || activeProject)?.location), [shiftProject, activeProject]);
+            const shiftAllowedRadius = useMemo(() => parseInt((shiftProject || activeProject)?.radius) || 150, [shiftProject, activeProject]);
 
-            const evaluateWorkerPosition = async (pos, triggerAlertIfOut = true) => {
+            const matchProjectsByCoords = (coords, preferredId = selectedProjId) => {
+                if (window.AlOstaActivityEngine && typeof window.AlOstaActivityEngine.matchWorkerAcrossProjects === 'function') {
+                    return window.AlOstaActivityEngine.matchWorkerAcrossProjects(coords, allProjects, {
+                        workerId: lW.id || worker?.id || '',
+                        preferredProjectId: preferredId || '',
+                        extractCoordsFn: extractCoords
+                    });
+                }
+                const byId = {};
+                const evaluated = [];
+                (allProjects || []).forEach(p => {
+                    const pc = extractCoords(p?.location);
+                    if (!pc) return;
+                    const rad = Math.max(20, parseInt(p.radius, 10) || 150);
+                    const rd = calcDistance(coords.lat, coords.lng, pc.lat, pc.lng);
+                    const ed = calcEffectiveDistance(coords.lat, coords.lng, pc.lat, pc.lng, coords.acc || 0);
+                    const entry = {
+                        project: p,
+                        coords: pc,
+                        radius: rad,
+                        rawDist: rd,
+                        effectiveDist: ed,
+                        inBounds: ed <= rad,
+                        isAssigned: Array.isArray(p.workerIds) && p.workerIds.includes(lW.id || worker?.id)
+                    };
+                    evaluated.push(entry);
+                    byId[p.id] = entry;
+                });
+                evaluated.sort((a, b) => (a.inBounds !== b.inBounds ? (a.inBounds ? -1 : 1) : (a.isAssigned !== b.isAssigned ? (a.isAssigned ? -1 : 1) : a.effectiveDist - b.effectiveDist)));
+                const matched = evaluated.find(e => e.inBounds) || null;
+                const nearest = evaluated.slice().sort((a, b) => a.rawDist - b.rawDist)[0] || null;
+                return { matched, nearest, evaluated, byId };
+            };
+
+            const handleSelectProjectChange = (newProjId) => {
+                if (!newProjId) return;
+                manualProjPickRef.current = true;
+                setSelectedProjId(newProjId);
+                const chosen = allProjects.find(p => p.id === newProjId);
+                const chosenCoords = extractCoords(chosen?.location);
+                const lastC = lastCoordsRef.current;
+                if (lastC && chosenCoords) {
+                    const rad = parseInt(chosen?.radius) || 150;
+                    const rd = calcDistance(lastC.lat, lastC.lng, chosenCoords.lat, chosenCoords.lng);
+                    const ed = calcEffectiveDistance(lastC.lat, lastC.lng, chosenCoords.lat, chosenCoords.lng, lastC.acc || 0);
+                    setLiveGps({ coords: lastC, rawDist: rd, effectiveDist: ed, inBounds: ed <= rad, error: null, updatedAt: Date.now() });
+                } else if (!chosenCoords) {
+                    setLiveGps({ coords: lastC, rawDist: null, effectiveDist: null, inBounds: null, error: null, updatedAt: Date.now() });
+                } else {
+                    setLiveGps(p => ({ ...p, rawDist: null, effectiveDist: null, inBounds: null }));
+                }
+            };
+
+            const transferActiveShiftProject = async (targetProj) => {
+                if (!tA?.id || !targetProj?.id) return;
+                try {
+                    await db.collection('attendance').doc(tA.id).update({
+                        projectId: targetProj.id,
+                        projectTitle: targetProj.title || ''
+                    });
+                    outOfBoundsStreakRef.current = { count: 0, lastAt: 0 };
+                    setLeftSiteWarning(null);
+                    setSelectedProjId(targetProj.id);
+                    addToast(lang === 'ar'
+                        ? `✅ تم نقل مناوبتك النشطة إلى موقع "${targetProj.title}"`
+                        : `✅ Active shift transferred to "${targetProj.title}"`);
+                } catch (err) {
+                    addToast(lang === 'ar' ? 'تعذر نقل موقع المناوبة، حاول مرة أخرى' : 'Failed to transfer shift project');
+                }
+            };
+
+            const evaluateWorkerPosition = async (pos, triggerAlertIfOut = true, options = {}) => {
                 const coords = {
                     lat: pos.coords.latitude,
                     lng: pos.coords.longitude,
                     acc: Math.round(pos.coords.accuracy || 0)
                 };
-                if (!activeSiteCoords) {
-                    setLiveGps({ coords, rawDist: null, effectiveDist: null, inBounds: true, error: null, updatedAt: Date.now() });
-                    return { coords, rawDist: null, effectiveDist: null, inBounds: true };
-                }
-                const rawDist = calcDistance(coords.lat, coords.lng, activeSiteCoords.lat, activeSiteCoords.lng);
-                const effectiveDist = calcEffectiveDistance(coords.lat, coords.lng, activeSiteCoords.lat, activeSiteCoords.lng, coords.acc);
+                lastCoordsRef.current = coords;
                 const nowMs = Date.now();
 
-                // Ignore extremely coarse cell-tower jumps (>90m accuracy) unless undeniably far outside
-                if (triggerAlertIfOut && coords.acc > 90 && (rawDist - coords.acc) <= (allowedRadius + 120)) {
-                    return { coords, rawDist, effectiveDist, inBounds: true, ignoredLowAccuracy: true };
+                // Always compare live GPS across ALL assigned projects so multi-site workers immediately see which site they are at
+                const scan = matchProjectsByCoords(coords, activeProject?.id || '');
+                setProjectDistances(scan.byId);
+
+                let displayProj = activeProject;
+                let displayEntry = activeProject?.id ? (scan.byId[activeProject.id] || null) : null;
+                const allowAutoSwitch = options.forceAutoMatch === true || !manualProjPickRef.current;
+
+                if (allowAutoSwitch && scan.matched) {
+                    // Auto-select whichever assigned project site the worker is physically standing inside!
+                    if (!displayEntry || !displayEntry.inBounds || (options.forceAutoMatch && scan.matched.project.id !== activeProject?.id)) {
+                        displayProj = scan.matched.project;
+                        displayEntry = scan.matched;
+                        if (scan.matched.project.id !== selectedProjId) {
+                            setSelectedProjId(scan.matched.project.id);
+                        }
+                    }
+                } else if (allowAutoSwitch && !isWorkerShiftRunning && !scan.matched && scan.nearest) {
+                    // Outside all sites and not manually pinned -> show closest assigned project instead of a far old project
+                    if (!displayEntry || scan.nearest.rawDist + 150 < displayEntry.rawDist) {
+                        displayProj = scan.nearest.project;
+                        displayEntry = scan.nearest;
+                        if (scan.nearest.project.id !== selectedProjId) {
+                            setSelectedProjId(scan.nearest.project.id);
+                        }
+                    }
                 }
 
-                const inBounds = effectiveDist <= allowedRadius;
+                const displaySiteCoords = displayEntry?.coords || extractCoords(displayProj?.location);
+                const displayRadius = displayEntry?.radius || (parseInt(displayProj?.radius) || 150);
+
+                if (!displaySiteCoords) {
+                    setLiveGps({ coords, rawDist: null, effectiveDist: null, inBounds: true, error: null, updatedAt: nowMs });
+                    return { coords, rawDist: null, effectiveDist: null, inBounds: true, scan };
+                }
+
+                const rawDist = displayEntry ? displayEntry.rawDist : calcDistance(coords.lat, coords.lng, displaySiteCoords.lat, displaySiteCoords.lng);
+                const effectiveDist = displayEntry ? displayEntry.effectiveDist : calcEffectiveDistance(coords.lat, coords.lng, displaySiteCoords.lat, displaySiteCoords.lng, coords.acc);
+
+                // Ignore extremely coarse cell-tower jumps (>90m accuracy) unless undeniably far outside
+                if (triggerAlertIfOut && coords.acc > 90 && (rawDist - coords.acc) <= (displayRadius + 120)) {
+                    return { coords, rawDist, effectiveDist, inBounds: true, ignoredLowAccuracy: true, scan };
+                }
+
+                const inBounds = effectiveDist <= displayRadius;
                 setLiveGps({ coords, rawDist, effectiveDist, inBounds, error: null, updatedAt: nowMs });
 
-                if (inBounds) {
+                // Broadcast worker's GPS-matched site to telemetry (throttled: only when matched site changes or every 10 min)
+                // so manual attendance & payroll always know which project site the worker is physically at today!
+                if (scan.matched?.project?.id && lW?.id) {
+                    const matchedP = scan.matched.project;
+                    const siteStampKey = `${matchedP.id}_${todayStr()}`;
+                    const lastSiteSync = outOfBoundsAlertSentRef.current.__lastLiveSiteSync || {};
+                    if (lastSiteSync.key !== siteStampKey || (nowMs - (lastSiteSync.at || 0)) >= 600000) {
+                        outOfBoundsAlertSentRef.current.__lastLiveSiteSync = { key: siteStampKey, at: nowMs };
+                        const siteAdminId = String(matchedP.adminId || lW.adminId || worker?.adminId || '').trim();
+                        const siteTelemetry = {
+                            workerId: lW.id,
+                            adminId: siteAdminId,
+                            liveProjectId: matchedP.id,
+                            liveProjectTitle: matchedP.title || '',
+                            liveLat: coords.lat,
+                            liveLng: coords.lng,
+                            liveAcc: coords.acc,
+                            liveLocDate: todayStr(),
+                            liveInBounds: true,
+                            liveSiteDist: scan.matched.rawDist
+                        };
+                        db.collection('worker_telemetry').doc(lW.id).set(siteTelemetry, { merge: true }).catch(() => {});
+                        if (siteAdminId) {
+                            db.collection('worker_telemetry').doc(`crew_${siteAdminId}`).set({
+                                adminId: siteAdminId,
+                                isCrewBoard: true,
+                                updatedAt: nowMs,
+                                workers: { [lW.id]: siteTelemetry }
+                            }, { merge: true }).catch(() => {});
+                        }
+                    }
+                    // If contractor manually marked worker present on another site before worker opened app,
+                    // auto-reattach today's attendance & daily wage to the ACTUAL GPS site where the worker is standing!
+                    if (tA?.id && tA.date === todayStr() && !tA.timeOut && tA.inStatus === 'manual' && !tA.inLoc && tA.projectId !== matchedP.id) {
+                        db.collection('attendance').doc(tA.id).update({
+                            projectId: matchedP.id,
+                            projectTitle: matchedP.title || '',
+                            inLoc: coords,
+                            inStatus: 'valid',
+                            inDist: scan.matched.rawDist
+                        }).catch(() => {});
+                    }
+                }
+
+                // Evaluate shift departure strictly against the worker's ACTIVE shift project (or any assigned site they moved into)
+                const trackedShiftProj = shiftProject || displayProj;
+                const trackedEntry = trackedShiftProj?.id ? (scan.byId[trackedShiftProj.id] || null) : null;
+                const shiftInBounds = trackedEntry ? trackedEntry.inBounds : inBounds;
+                const shiftRawDist = trackedEntry ? trackedEntry.rawDist : rawDist;
+                const shiftEffDist = trackedEntry ? trackedEntry.effectiveDist : effectiveDist;
+                const shiftRad = trackedEntry ? trackedEntry.radius : displayRadius;
+                const insideAnyAssignedSite = Boolean(shiftInBounds || (scan.matched && scan.matched.isAssigned));
+
+                if (insideAnyAssignedSite) {
                     outOfBoundsStreakRef.current = { count: 0, lastAt: 0 };
                     setLeftSiteWarning(null);
                     if (insideSiteSinceRef.current === 0) {
@@ -12685,7 +12951,7 @@
                         const alertKey = `${tA.id}_${todayStr()}`;
                         delete outOfBoundsAlertSentRef.current[alertKey];
                     }
-                } else if (triggerAlertIfOut && tA && tA.timeIn && !tA.timeOut) {
+                } else if (triggerAlertIfOut && tA && tA.timeIn && !tA.timeOut && trackedEntry) {
                     insideSiteSinceRef.current = 0;
                     const streak = outOfBoundsStreakRef.current;
                     const hasTimeGap = streak.lastAt > 0 && (nowMs - streak.lastAt) >= 5000;
@@ -12695,17 +12961,17 @@
                         outOfBoundsStreakRef.current = { count: streak.count + 1, lastAt: nowMs };
                     }
 
-                    const highConfidenceFarExit = coords.acc <= 35 && effectiveDist > (allowedRadius + 80);
+                    const highConfidenceFarExit = coords.acc <= 35 && shiftEffDist > (shiftRad + 80);
                     const confirmedDeparture = highConfidenceFarExit || (streak.count >= 1 && hasTimeGap);
 
                     if (!confirmedDeparture) {
-                        return { coords, rawDist, effectiveDist, inBounds: false, pendingConfirmation: true };
+                        return { coords, rawDist, effectiveDist, inBounds: false, pendingConfirmation: true, scan };
                     }
 
                     const alertKey = `${tA.id}_${todayStr()}`;
                     setLeftSiteWarning({
-                        dist: rawDist,
-                        projectTitle: activeProject?.title || '',
+                        dist: shiftRawDist,
+                        projectTitle: trackedShiftProj?.title || '',
                         time: nowMs
                     });
 
@@ -12720,21 +12986,21 @@
 
                     if (!recentlySentJs && !recentlySentNative && !outOfBoundsInFlightRef.current[alertKey]) {
                         outOfBoundsInFlightRef.current[alertKey] = true;
-                        const targetAdminId = String(activeProject?.adminId || lW.adminId || worker?.adminId || '').trim();
+                        const targetAdminId = String(trackedShiftProj?.adminId || lW.adminId || worker?.adminId || '').trim();
                         try {
                             const sentDocId = await sendContractorNotification(db, {
                                 date: todayStr(),
                                 workerId: lW.id,
                                 workerName: lW.name,
                                 adminId: targetAdminId,
-                                projectId: activeProject?.id || null,
-                                projectTitle: activeProject?.title || '',
+                                projectId: trackedShiftProj?.id || null,
+                                projectTitle: trackedShiftProj?.title || '',
                                 timeIn: tA.timeIn,
                                 timeOut: nowMs,
                                 inLoc: coords,
                                 outLoc: coords,
                                 inStatus: 'invalid',
-                                inDist: rawDist,
+                                inDist: shiftRawDist,
                                 type: 'left_site'
                             });
                             if (sentDocId) {
@@ -12747,14 +13013,14 @@
                                 } catch (e) {}
                                 const warnTitle = lang === 'ar' ? '⚠️ تنبيه: ابتعدت عن موقع العمل!' : '⚠️ Alert: Left Work Site!';
                                 const warnBody = lang === 'ar'
-                                    ? `أنت الآن على بعد ${rawDist} متر عن "${activeProject?.title || 'موقع العمل'}". تم إشعار المقاول.`
-                                    : `You are ${rawDist}m away from "${activeProject?.title || 'Work Site'}". Contractor notified.`;
+                                    ? `أنت الآن على بعد ${shiftRawDist} متر عن "${trackedShiftProj?.title || 'موقع العمل'}". تم إشعار المقاول.`
+                                    : `You are ${shiftRawDist}m away from "${trackedShiftProj?.title || 'Work Site'}". Contractor notified.`;
                                 triggerNativeNotification(warnTitle, warnBody);
                                 addToast(warnBody);
                             }
                             await db.collection('attendance').doc(tA.id).update({
                                 outLoc: coords,
-                                outDist: rawDist,
+                                outDist: shiftRawDist,
                                 outStatus: 'invalid',
                                 leftSiteAt: nowMs
                             }).catch(() => {});
@@ -12764,23 +13030,21 @@
                         }
                     }
                 }
-                return { coords, rawDist, effectiveDist, inBounds };
+                return { coords, rawDist, effectiveDist, inBounds, scan };
             };
 
-            const refreshLiveLocation = async () => {
+            const refreshLiveLocation = async (autoMatch = true) => {
                 setGpsLoading(true);
+                if (autoMatch) manualProjPickRef.current = false;
                 try {
                     const pos = await requestGeolocation({ enableHighAccuracy: true, maximumAge: 0, forceFresh: true, timeout: 10000 });
-                    await evaluateWorkerPosition(pos, true);
+                    await evaluateWorkerPosition(pos, true, { forceAutoMatch: autoMatch });
                 } catch (err) {
                     setLiveGps(p => ({ ...p, error: err.message || 'GPS Error', updatedAt: Date.now() }));
                 } finally {
                     setGpsLoading(false);
                 }
             };
-
-            // Battery-optimized GPS: single check on load, continuous GPS radio ONLY while actively clocked in on shift
-            const isWorkerShiftRunning = Boolean(tA && tA.date === todayStr() && tA.status !== 'absent' && tA.timeIn && !tA.timeOut);
 
             useEffect(() => {
                 try {
@@ -12801,19 +13065,20 @@
             useEffect(() => {
                 try {
                     if (!window.AndroidApp || typeof window.AndroidApp.setShiftGeofenceConfig !== 'function') return;
-                    const geofenceAdminId = String(activeProject?.adminId || lW.adminId || worker?.adminId || '').trim();
-                    if (isWorkerShiftRunning && tA?.id && activeSiteCoords && geofenceAdminId) {
+                    const geoProj = shiftProject || activeProject;
+                    const geofenceAdminId = String(geoProj?.adminId || lW.adminId || worker?.adminId || '').trim();
+                    if (isWorkerShiftRunning && tA?.id && shiftSiteCoords && geofenceAdminId) {
                         window.AndroidApp.setShiftGeofenceConfig(JSON.stringify({
                             active: true,
                             attendanceId: tA.id,
                             workerId: lW.id,
                             workerName: lW.name || '',
                             adminId: geofenceAdminId,
-                            projectId: activeProject?.id || tA.projectId || '',
-                            projectTitle: activeProject?.title || '',
-                            siteLat: activeSiteCoords.lat,
-                            siteLng: activeSiteCoords.lng,
-                            radiusMeters: allowedRadius,
+                            projectId: geoProj?.id || tA.projectId || '',
+                            projectTitle: geoProj?.title || '',
+                            siteLat: shiftSiteCoords.lat,
+                            siteLng: shiftSiteCoords.lng,
+                            radiusMeters: shiftAllowedRadius,
                             timeIn: tA.timeIn || Date.now(),
                             date: tA.date || todayStr(),
                             fbProjectId: firebaseConfig.projectId || '',
@@ -12823,7 +13088,7 @@
                         window.AndroidApp.setShiftGeofenceConfig(JSON.stringify({ active: false }));
                     }
                 } catch (e) {}
-            }, [isWorkerShiftRunning, workerSyncing, tA?.id, tA?.timeIn, tA?.date, tA?.projectId, activeProject?.id, activeProject?.title, activeProject?.adminId, activeSiteCoords?.lat, activeSiteCoords?.lng, allowedRadius, lW.id, lW.name, lW.adminId]);
+            }, [isWorkerShiftRunning, workerSyncing, tA?.id, tA?.timeIn, tA?.date, tA?.projectId, shiftProject?.id, activeProject?.id, shiftProject?.title, activeProject?.title, shiftProject?.adminId, activeProject?.adminId, shiftSiteCoords?.lat, shiftSiteCoords?.lng, shiftAllowedRadius, lW.id, lW.name, lW.adminId]);
 
             // Sync active shift telemetry parameters to native Android service so steps, effort & heartbeat
             // keep uploading to Firestore even when the phone is locked, backgrounded, or the app is closed.
@@ -12883,7 +13148,7 @@
                         try { navigator.geolocation.clearWatch(watchId); } catch (e) { }
                     }
                 };
-            }, [activeProject?.id, activeSiteCoords?.lat, activeSiteCoords?.lng, allowedRadius, isWorkerShiftRunning]);
+            }, [activeProject?.id, activeSiteCoords?.lat, activeSiteCoords?.lng, allowedRadius, isWorkerShiftRunning, allProjects.length]);
 
             const unreadCount = (pendingReq ? 1 : 0) + marketRequests.length;
             useAppNotifications(unreadCount, 'نظام أستاذ وعد | الأسطة', lang === 'ar' ? 'لديك إشعارات أو عروض عمل جديدة' : 'You have new notifications or job offers');
@@ -13219,8 +13484,9 @@
                         return;
                     }
 
-                    const evalRes = await evaluateWorkerPosition(pos, false);
+                    const evalRes = await evaluateWorkerPosition(pos, false, { forceAutoMatch: true });
                     const coords = evalRes.coords;
+                    const scan = evalRes.scan || matchProjectsByCoords(coords, activeProject?.id || '');
 
                     let targetProj = activeProject;
                     let targetSiteCoords = activeSiteCoords;
@@ -13228,25 +13494,22 @@
                     let rawDist = evalRes.rawDist;
                     let inBounds = evalRes.inBounds;
 
-                    // If current selected project has no location or worker is outside it, check if worker is at another assigned project site
-                    if (!targetSiteCoords || !inBounds) {
-                        for (const p of allProjects) {
-                            const pCoords = extractCoords(p.location);
-                            if (!pCoords) continue;
-                            const pRadius = parseInt(p.radius) || 150;
-                            const pRawDist = calcDistance(coords.lat, coords.lng, pCoords.lat, pCoords.lng);
-                            const pEffDist = calcEffectiveDistance(coords.lat, coords.lng, pCoords.lat, pCoords.lng, coords.acc);
-                            if (pEffDist <= pRadius) {
-                                targetProj = p;
-                                targetSiteCoords = pCoords;
-                                targetRadius = pRadius;
-                                rawDist = pRawDist;
-                                inBounds = true;
-                                setSelectedProjId(p.id);
-                                setLiveGps({ coords, rawDist: pRawDist, effectiveDist: pEffDist, inBounds: true, error: null, updatedAt: Date.now() });
-                                break;
-                            }
-                        }
+                    // Multi-site comparison: if worker is physically inside ANY assigned project site, match that exact project!
+                    if (scan.matched) {
+                        targetProj = scan.matched.project;
+                        targetSiteCoords = scan.matched.coords;
+                        targetRadius = scan.matched.radius;
+                        rawDist = scan.matched.rawDist;
+                        inBounds = true;
+                        setSelectedProjId(scan.matched.project.id);
+                        setLiveGps({ coords, rawDist: scan.matched.rawDist, effectiveDist: scan.matched.effectiveDist, inBounds: true, error: null, updatedAt: Date.now() });
+                    } else if (!targetSiteCoords && scan.nearest) {
+                        targetProj = scan.nearest.project;
+                        targetSiteCoords = scan.nearest.coords;
+                        targetRadius = scan.nearest.radius;
+                        rawDist = scan.nearest.rawDist;
+                        inBounds = scan.nearest.inBounds;
+                        setSelectedProjId(scan.nearest.project.id);
                     }
 
                     if (!targetSiteCoords) {
@@ -13288,6 +13551,7 @@
                         await db.collection('attendance').doc(existingTodayAtt.id).update({
                             status: existingTodayAtt.status && existingTodayAtt.status !== 'absent' ? existingTodayAtt.status : 'full',
                             projectId: targetProj?.id || existingTodayAtt.projectId || null,
+                            projectTitle: targetProj?.title || existingTodayAtt.projectTitle || '',
                             timeIn: existingTodayAtt.timeIn || Date.now(),
                             inLoc: coords,
                             inStatus: 'valid',
@@ -13312,8 +13576,8 @@
                             }).catch(() => {});
                         }
                         addToast(lang === 'ar'
-                            ? `✓ تم توثيق موقعك (${distance}م) وتأكيد حضور اليوم المسجل لدى المقاول بدون تكرار الأجر`
-                            : `✓ Location verified (${distance}m) & merged with today's attendance`);
+                            ? `✓ تم توثيق موقعك (${distance}م) وتثبيت يومية اليوم على مشروع «${targetProj?.title || 'الموقع'}» بدون تكرار الأجر`
+                            : `✓ Location verified (${distance}m) & daily wage linked to "${targetProj?.title || 'site'}"`);
                         return;
                     }
 
@@ -13322,6 +13586,8 @@
                         await db.collection('notifications').doc(pendingReq.id).update({
                             adminId: pendingAdminId,
                             adminInboxKey: pendingAdminId ? `${pendingAdminId}__unread` : '',
+                            projectId: targetProj?.id || pendingReq.projectId || null,
+                            projectTitle: targetProj?.title || pendingReq.projectTitle || '',
                             inLoc: coords,
                             inStatus: 'valid',
                             inDist: distance,
@@ -13332,8 +13598,8 @@
                             timeIn: pendingReq.timeIn || Date.now()
                         });
                         addToast(lang === 'ar'
-                            ? `✓ طلب الحضور مرسل مسبقاً لهذا اليوم وتم تحديث موقعك (${distance}م)`
-                            : `✓ Clock-in request already sent for today (${distance}m)`);
+                            ? `✓ تم تحديث موقعك (${distance}م) وربط طلب اليومية بمشروع «${targetProj?.title || 'الموقع'}»`
+                            : `✓ Updated GPS (${distance}m) & linked request to "${targetProj?.title || 'site'}"`);
                         return;
                     }
 
@@ -13360,8 +13626,8 @@
                     });
 
                     addToast(lang === 'ar'
-                        ? `✓ تم التحقق من تواجدك في موقع المشروع (${distance}م) وإرسال طلب تسجيل الحضور للمقاول`
-                        : `✓ Location matched (${distance}m) & attendance request sent`);
+                        ? `✓ تم التحقق من تواجدك في «${targetProj?.title || 'موقع المشروع'}» (${distance}م) وإرسال طلب احتساب اليومية للمقاول`
+                        : `✓ Location matched "${targetProj?.title || 'project'}" (${distance}m) & attendance request sent`);
                 } catch (error) {
                     addToast(lang === 'ar' ? 'حدث خطأ أثناء التحقق من الموقع' : 'Error verifying location');
                 } finally {
@@ -13819,22 +14085,61 @@
 
                         {allProjects.length > 0 && (
                             <div className="bg-white dark:bg-slate-800 p-4 rounded-3xl border dark:border-slate-700 space-y-3 shadow-xs">
-                                <div className="flex items-center justify-between">
-                                    <span className="text-xs font-black text-slate-600 dark:text-slate-300 flex items-center gap-1.5">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="text-xs font-black text-slate-600 dark:text-slate-300 flex items-center gap-1.5 shrink-0">
                                         <Icon name="map-pin" size={16} className="text-indigo-600 dark:text-indigo-400" />
                                         <span>{tr('activeProject')}</span>
                                     </span>
-                                    <select value={activeProject?.id || ''} onChange={e => setSelectedProjId(e.target.value)} className="bg-indigo-50 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-300 font-black text-xs px-3 py-1.5 rounded-xl outline-none">
-                                        {allProjects.map(p => <option key={p.id} value={p.id}>{p.title}</option>)}
+                                    <select
+                                        value={activeProject?.id || ''}
+                                        onChange={e => handleSelectProjectChange(e.target.value)}
+                                        className="min-w-0 max-w-[68%] bg-indigo-50 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-300 font-black text-xs px-3 py-1.5 rounded-xl outline-none truncate"
+                                    >
+                                        {allProjects.map(p => {
+                                            const st = projectDistances[p.id];
+                                            const distSuffix = st
+                                                ? (st.inBounds
+                                                    ? ` (${st.rawDist}م ✓)`
+                                                    : (st.rawDist >= 1000 ? ` (${(st.rawDist / 1000).toFixed(1)}كم)` : ` (${st.rawDist}م)`))
+                                                : '';
+                                            return <option key={p.id} value={p.id}>{p.title}{distSuffix}</option>;
+                                        })}
                                     </select>
                                 </div>
+
+                                {isWorkerShiftRunning && shiftProject && activeProject && shiftProject.id !== activeProject.id && (
+                                    <div className="p-2.5 rounded-2xl bg-indigo-50/90 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 flex items-center justify-between gap-2">
+                                        <p className="text-[11px] font-bold text-indigo-800 dark:text-indigo-200">
+                                            {lang === 'ar'
+                                                ? `مناوبتك مسجلة على: "${shiftProject.title}"`
+                                                : `Active shift is on: "${shiftProject.title}"`}
+                                        </p>
+                                        {liveGps.inBounds === true ? (
+                                            <button
+                                                type="button"
+                                                onClick={() => transferActiveShiftProject(activeProject)}
+                                                className="shrink-0 px-2.5 py-1.5 bg-emerald-600 text-white rounded-xl font-black text-[10px] active:scale-95 shadow-xs"
+                                            >
+                                                {lang === 'ar' ? '🔄 نقل المناوبة هنا' : '🔄 Move Shift Here'}
+                                            </button>
+                                        ) : (
+                                            <button
+                                                type="button"
+                                                onClick={() => handleSelectProjectChange(shiftProject.id)}
+                                                className="shrink-0 px-2.5 py-1.5 bg-indigo-600 text-white rounded-xl font-black text-[10px] active:scale-95 shadow-xs"
+                                            >
+                                                {lang === 'ar' ? 'مشروع المناوبة' : 'Shift Site'}
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
 
                                 {activeSiteCoords ? (
                                     <div className={`p-3 rounded-2xl border flex items-center justify-between ${liveGps.inBounds === true ? 'bg-emerald-50/80 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800' : liveGps.inBounds === false ? 'bg-rose-50/80 dark:bg-rose-950/30 border-rose-200 dark:border-rose-800' : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700'}`}>
                                         <div>
                                             <p className={`text-xs font-black ${liveGps.inBounds === true ? 'text-emerald-700 dark:text-emerald-300' : liveGps.inBounds === false ? 'text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-300'}`}>
                                                 {liveGps.inBounds === true
-                                                    ? (lang === 'ar' ? '✓ موقعك متطابق مع موقع العمل' : '✓ Matched with work site')
+                                                    ? (lang === 'ar' ? `✓ موقعك متطابق مع "${activeProject?.title || 'موقع العمل'}"` : `✓ Matched with "${activeProject?.title || 'work site'}"`)
                                                     : liveGps.inBounds === false
                                                         ? (lang === 'ar' ? '⚠️ أنت خارج نطاق موقع العمل' : '⚠️ Outside work site radius')
                                                         : (lang === 'ar' ? 'جاري فحص تطابق موقع العمل...' : 'Checking site GPS match...')}
@@ -13849,12 +14154,12 @@
                                         </div>
                                         <button
                                             type="button"
-                                            onClick={refreshLiveLocation}
+                                            onClick={() => refreshLiveLocation(true)}
                                             disabled={gpsLoading}
                                             className="px-3 py-2 bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-xl text-[11px] font-black text-indigo-600 dark:text-indigo-400 shadow-xs active:scale-95 flex items-center gap-1 shrink-0"
                                         >
                                             <Icon name="crosshair" size={14} />
-                                            <span>{gpsLoading ? '...' : tr('update')}</span>
+                                            <span>{gpsLoading ? '...' : (allProjects.length > 1 ? (lang === 'ar' ? 'فحص المواقع' : 'Scan Sites') : tr('update'))}</span>
                                         </button>
                                     </div>
                                 ) : (
