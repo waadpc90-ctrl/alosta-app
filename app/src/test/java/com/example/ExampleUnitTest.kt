@@ -145,6 +145,22 @@ class ExampleUnitTest {
         val (jobTitle, jobBody) = AlOstaBackgroundNotifier.formatPersonalAlert("job_apply", "سجاد", "", "")
         assertTrue(jobTitle.contains("متقدم"))
         assertTrue(jobBody.contains("سجاد"))
+
+        val (wAppAttTitle, wAppAttBody) = AlOstaBackgroundNotifier.formatWorkerDecisionAlert("approved", "clock_in", "فيلا المنصور", "")
+        assertTrue(wAppAttTitle.contains("اعتماد حضورك"))
+        assertTrue(wAppAttBody.contains("فيلا المنصور"))
+
+        val (wRejAttTitle, wRejAttBody) = AlOstaBackgroundNotifier.formatWorkerDecisionAlert("rejected", "clock_in", "برج الكرادة", "")
+        assertTrue(wRejAttTitle.contains("رفض"))
+        assertTrue(wRejAttBody.contains("برج الكرادة"))
+
+        val (wAppMatTitle, wAppMatBody) = AlOstaBackgroundNotifier.formatWorkerDecisionAlert("approved", "worker_material", "فيلا المنصور", "إسمنت أبيض")
+        assertTrue(wAppMatTitle.contains("الموافقة") && wAppMatTitle.contains("المواد"))
+        assertTrue(wAppMatBody.contains("إسمنت أبيض") && wAppMatBody.contains("فيلا المنصور"))
+
+        val (wRejMatTitle, wRejMatBody) = AlOstaBackgroundNotifier.formatWorkerDecisionAlert("rejected", "worker_material", "برج الكرادة", "صبغ جوتن")
+        assertTrue(wRejMatTitle.contains("رفض") && wRejMatTitle.contains("المواد"))
+        assertTrue(wRejMatBody.contains("صبغ جوتن") && wRejMatBody.contains("برج الكرادة"))
     }
 
     @Test

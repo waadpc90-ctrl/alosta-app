@@ -94,7 +94,7 @@ import androidx.core.content.ContextCompat
 import com.example.ui.theme.MyApplicationTheme
 import java.util.concurrent.atomic.AtomicInteger
 
-private const val NOTIFICATION_CHANNEL_ID = "al_osta_notifications"
+private const val NOTIFICATION_CHANNEL_ID = "al_osta_alerts_v2"
 
 open class MainActivity : ComponentActivity() {
 
@@ -201,6 +201,8 @@ open class MainActivity : ComponentActivity() {
             ).apply {
                 description = getString(R.string.notification_channel_desc)
                 enableVibration(true)
+                enableLights(true)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
             }
             val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(channel)
@@ -505,6 +507,8 @@ class AndroidAppBridge(
                     .setContentText(safeBody)
                     .setStyle(NotificationCompat.BigTextStyle().bigText(safeBody))
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                     .setDefaults(NotificationCompat.DEFAULT_ALL)
                     .setAutoCancel(true)
                     .setContentIntent(pendingIntent)
@@ -582,6 +586,19 @@ class AndroidAppBridge(
     fun clearNotificationProfile() {
         if (!isTrustedCallerOrigin()) return
         AlOstaBackgroundNotifier.clearUserSession(context)
+    }
+
+    @JavascriptInterface
+    fun markNotificationSeen(dedupeKey: String?) {
+        if (isTrustedCallerOrigin()) AlOstaBackgroundNotifier.markNotificationSeen(context, dedupeKey)
+    }
+
+    @JavascriptInterface
+    fun isBatteryOptimizationIgnored(): Boolean = AlOstaBackgroundNotifier.isBatteryOptimizationIgnored(context)
+
+    @JavascriptInterface
+    fun openBatteryOptimizationSettings() {
+        mainHandler.post { AlOstaBackgroundNotifier.openBatteryOptimizationSettings(context) }
     }
 
     @JavascriptInterface

@@ -3,7 +3,7 @@
             if (l) l.style.display = 'none';
         })();
 
-        const APP_VERSION = "1.0.24";
+        const APP_VERSION = "1.0.25";
 
         const firebaseConfig = { apiKey: "AIzaSyDpeicW_gpXfqeuur7g08nQ9Nr0DTIkoaM", authDomain: "craftsmanapp-3e46b.firebaseapp.com", projectId: "craftsmanapp-3e46b", storageBucket: "craftsmanapp-3e46b.firebasestorage.app", messagingSenderId: "567712814306", appId: "1:567712814306:web:f27769f9ce59af1a22fabb" };
 
@@ -6020,12 +6020,26 @@
                 } catch (e) {}
                 return true;
             });
+            const [batteryOptIgnored, setBatteryOptIgnored] = useState(() => {
+                try {
+                    if (window.AndroidApp && typeof window.AndroidApp.isBatteryOptimizationIgnored === 'function') {
+                        return Boolean(window.AndroidApp.isBatteryOptimizationIgnored());
+                    }
+                } catch (e) {}
+                return true;
+            });
+            const [battBannerDismissed, setBattBannerDismissed] = useState(() => {
+                try { return localStorage.getItem('alosta_batt_banner_dismissed') === '1'; } catch (e) { return false; }
+            });
 
             useEffect(() => {
                 const checkPerm = () => {
                     try {
                         if (window.AndroidApp && typeof window.AndroidApp.hasNotificationPermission === 'function') {
                             setNativeNotifEnabled(Boolean(window.AndroidApp.hasNotificationPermission()));
+                        }
+                        if (window.AndroidApp && typeof window.AndroidApp.isBatteryOptimizationIgnored === 'function') {
+                            setBatteryOptIgnored(Boolean(window.AndroidApp.isBatteryOptimizationIgnored()));
                         }
                     } catch (e) {}
                 };
@@ -6053,6 +6067,13 @@
                     ...(data.requests || []).map(r => ({ key: `ntf_${r.id}`, kind: 'notif', item: r })),
                     ...(jobApplicants || []).map(a => ({ key: `app_${a.id}`, kind: 'applicant', item: a }))
                 ];
+                const markNativeSeen = (dedupeKey) => {
+                    try {
+                        if (window.AndroidApp && typeof window.AndroidApp.markNotificationSeen === 'function') {
+                            window.AndroidApp.markNotificationSeen(String(dedupeKey || ''));
+                        }
+                    } catch (e) {}
+                };
 
                 if (!notifInitializedRef.current) {
                     // On initial load, seed existing IDs and alert only for very fresh (<5 min) unread items not yet shown in this session
@@ -6060,6 +6081,7 @@
                     const freshUnseen = [];
                     currentItems.forEach(entry => {
                         seenAdminNotifIdsRef.current.add(entry.key);
+                        markNativeSeen(entry.key);
                         const ts = Number(entry.item?.createdAt || entry.item?.timeOut || entry.item?.timeIn || entry.item?.timestamp || 0);
                         const sessKey = `alosta_alerted_${entry.key}`;
                         if (ts >= freshCutoff && !sessionStorage.getItem(sessKey)) {
@@ -6089,6 +6111,7 @@
 
                 newlyArrived.forEach(entry => {
                     seenAdminNotifIdsRef.current.add(entry.key);
+                    markNativeSeen(entry.key);
                     try { sessionStorage.setItem(`alosta_alerted_${entry.key}`, '1'); } catch (e) {}
                 });
 
@@ -7305,6 +7328,41 @@
                                 >
                                     تفعيل الآن
                                 </button>
+                            </div>
+                        )}
+
+                        {nativeNotifEnabled && !batteryOptIgnored && !battBannerDismissed && typeof window.AndroidApp?.openBatteryOptimizationSettings === 'function' && (
+                            <div className="no-print bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800 p-3 rounded-2xl flex items-center justify-between gap-2 shadow-xs">
+                                <div className="min-w-0 flex-1">
+                                    <p className="font-black text-xs text-indigo-950 dark:text-indigo-200">
+                                        ⚡ تحسين وصول الإشعارات الفورية عند قفل الهاتف
+                                    </p>
+                                    <p className="text-[10px] font-bold text-indigo-700 dark:text-indigo-300 mt-0.5 leading-relaxed">
+                                        استثنِ تطبيق «الأسطة» من توفير البطارية (غير مقيد) لضمان وصول إشعارات العمال فوراً في الخلفية
+                                    </p>
+                                </div>
+                                <div className="shrink-0 flex items-center gap-1.5">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            try { window.AndroidApp.openBatteryOptimizationSettings(); } catch (e) {}
+                                        }}
+                                        className="px-2.5 py-2 bg-indigo-600 text-white rounded-xl font-black text-[11px] active:scale-95 shadow-sm"
+                                    >
+                                        ضبط الآن
+                                    </button>
+                                    <button
+                                        type="button"
+                                        aria-label="إغلاق"
+                                        onClick={() => {
+                                            setBattBannerDismissed(true);
+                                            try { localStorage.setItem('alosta_batt_banner_dismissed', '1'); } catch (e) {}
+                                        }}
+                                        className="w-8 h-8 rounded-xl bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-200 font-black text-xs flex items-center justify-center active:scale-95"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
                             </div>
                         )}
 
@@ -12424,6 +12482,46 @@
             const workerWatchUntilRef = useRef(0);
             const lastSyncedMotionStateRef = useRef('');
             const forceSyncStepsRef = useRef(null);
+            const seenWorkerNotifKeysRef = useRef(new Set());
+            const workerNotifInitRef = useRef(false);
+            const [workerNotifEnabled, setWorkerNotifEnabled] = useState(() => {
+                try {
+                    if (window.AndroidApp && typeof window.AndroidApp.hasNotificationPermission === 'function') {
+                        return Boolean(window.AndroidApp.hasNotificationPermission());
+                    }
+                } catch (e) {}
+                return true;
+            });
+            const [workerBatteryOptIgnored, setWorkerBatteryOptIgnored] = useState(() => {
+                try {
+                    if (window.AndroidApp && typeof window.AndroidApp.isBatteryOptimizationIgnored === 'function') {
+                        return Boolean(window.AndroidApp.isBatteryOptimizationIgnored());
+                    }
+                } catch (e) {}
+                return true;
+            });
+            const [workerBattBannerDismissed, setWorkerBattBannerDismissed] = useState(() => {
+                try { return localStorage.getItem('alosta_worker_batt_banner_dismissed') === '1'; } catch (e) { return false; }
+            });
+
+            useEffect(() => {
+                const checkWorkerPerm = () => {
+                    try {
+                        if (window.AndroidApp && typeof window.AndroidApp.hasNotificationPermission === 'function') {
+                            setWorkerNotifEnabled(Boolean(window.AndroidApp.hasNotificationPermission()));
+                        }
+                        if (window.AndroidApp && typeof window.AndroidApp.isBatteryOptimizationIgnored === 'function') {
+                            setWorkerBatteryOptIgnored(Boolean(window.AndroidApp.isBatteryOptimizationIgnored()));
+                        }
+                    } catch (e) {}
+                };
+                window.addEventListener('focus', checkWorkerPerm);
+                document.addEventListener('visibilitychange', checkWorkerPerm);
+                return () => {
+                    window.removeEventListener('focus', checkWorkerPerm);
+                    document.removeEventListener('visibilitychange', checkWorkerPerm);
+                };
+            }, []);
 
             useEffect(() => {
                 const wSyncTimer = setTimeout(() => setWorkerSyncing(false), 600);
@@ -12476,8 +12574,41 @@
                         const allNotifs = s.docs.map(x => ({ id: x.id, ...x.data() }));
                         setPendingReq(allNotifs.find(x => x.date === todayStr() && x.status === 'unread' && (!x.type || x.type === 'clock_in' || x.type === 'attendance')) || null);
                         setD(p => ({ ...p, pendingMats: allNotifs.filter(x => x.type === 'worker_material' && x.status === 'unread') }));
+                        const decided = allNotifs.filter(x => x.status === 'approved' || x.status === 'rejected');
+                        decided.forEach(x => {
+                            const key = `ntf_w_${x.id}_${x.status}`;
+                            try {
+                                if (window.AndroidApp && typeof window.AndroidApp.markNotificationSeen === 'function') {
+                                    window.AndroidApp.markNotificationSeen(key);
+                                }
+                            } catch (e) {}
+                            if (workerNotifInitRef.current && !seenWorkerNotifKeysRef.current.has(key)) {
+                                const approved = x.status === 'approved';
+                                const isMat = x.type === 'worker_material';
+                                const title = isMat
+                                    ? (approved ? '✅ تمت الموافقة على فاتورة المواد' : '❌ تم رفض فاتورة المواد')
+                                    : (approved ? '✅ تم اعتماد حضورك في الموقع' : '❌ تم رفض طلب تسجيل الحضور');
+                                const body = isMat
+                                    ? (x.item ? `${x.item}${x.projectTitle ? ` - ${x.projectTitle}` : ''}` : (x.projectTitle || ''))
+                                    : (x.projectTitle || '');
+                                triggerNativeNotification(title, body || title);
+                                addToast(body ? `${title}: ${body}` : title);
+                            }
+                            seenWorkerNotifKeysRef.current.add(key);
+                        });
+                        workerNotifInitRef.current = true;
                     }),
-                    db.collection('market_requests').where('workerId', '==', worker.id).where('status', 'in', ['pending', 'invited']).limit(100).onSnapshot(s => setMarketRequests(s.docs.map(x => ({ id: x.id, ...x.data() })))),
+                    db.collection('market_requests').where('workerId', '==', worker.id).where('status', 'in', ['pending', 'invited']).limit(100).onSnapshot(s => {
+                        const mReqs = s.docs.map(x => ({ id: x.id, ...x.data() }));
+                        mReqs.forEach(m => {
+                            try {
+                                if (window.AndroidApp && typeof window.AndroidApp.markNotificationSeen === 'function') {
+                                    window.AndroidApp.markNotificationSeen(`mkt_${m.id}`);
+                                }
+                            } catch (e) {}
+                        });
+                        setMarketRequests(mReqs);
+                    }),
                     // Server-filtered job_ads by specialty (breaks global 100-ad cap!)
                     db.collection('job_ads').where('status', '==', 'active').where('specialty', '==', workerSpecialty).limit(jobAdsFetchLimit).onSnapshot(s => {
                         setJobAds(s.docs.map(x => ({ id: x.id, ...x.data() })));
@@ -13535,6 +13666,65 @@
                     <main className="flex-1 overflow-y-auto p-4 pb-20 space-y-4 relative">
                         {workerSyncing && d.atts.length === 0 && allProjects.length === 0 && (
                             <SkeletonList count={3} variant="card" />
+                        )}
+                        {!workerNotifEnabled && (
+                            <div className="bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-700 p-3 rounded-2xl flex items-center justify-between gap-2.5 shadow-xs">
+                                <div className="min-w-0">
+                                    <p className="font-black text-xs text-amber-900 dark:text-amber-200">
+                                        🔔 إشعارات الهاتف متوقفة لتطبيق الأسطة
+                                    </p>
+                                    <p className="text-[10px] font-bold text-amber-700 dark:text-amber-300 mt-0.5">
+                                        فعّل الإذن ليصلك تنبيه فوري عند موافقة المقاول أو وصول دعوات العمل
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        try {
+                                            if (window.AndroidApp && typeof window.AndroidApp.openNotificationSettings === 'function') {
+                                                window.AndroidApp.openNotificationSettings();
+                                            }
+                                        } catch (e) {}
+                                    }}
+                                    className="shrink-0 px-3 py-2 bg-amber-500 text-slate-950 rounded-xl font-black text-[11px] active:scale-95 shadow-sm"
+                                >
+                                    تفعيل الآن
+                                </button>
+                            </div>
+                        )}
+                        {workerNotifEnabled && !workerBatteryOptIgnored && !workerBattBannerDismissed && typeof window.AndroidApp?.openBatteryOptimizationSettings === 'function' && (
+                            <div className="bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800 p-3 rounded-2xl flex items-center justify-between gap-2 shadow-xs">
+                                <div className="min-w-0 flex-1">
+                                    <p className="font-black text-xs text-indigo-950 dark:text-indigo-200">
+                                        ⚡ تحسين وصول الإشعارات وعمل التطبيق في الخلفية
+                                    </p>
+                                    <p className="text-[10px] font-bold text-indigo-700 dark:text-indigo-300 mt-0.5 leading-relaxed">
+                                        استثنِ تطبيق «الأسطة» من توفير البطارية (غير مقيد) لضمان وصول التنبيهات فوراً
+                                    </p>
+                                </div>
+                                <div className="shrink-0 flex items-center gap-1.5">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            try { window.AndroidApp.openBatteryOptimizationSettings(); } catch (e) {}
+                                        }}
+                                        className="px-2.5 py-2 bg-indigo-600 text-white rounded-xl font-black text-[11px] active:scale-95 shadow-sm"
+                                    >
+                                        ضبط الآن
+                                    </button>
+                                    <button
+                                        type="button"
+                                        aria-label="إغلاق"
+                                        onClick={() => {
+                                            setWorkerBattBannerDismissed(true);
+                                            try { localStorage.setItem('alosta_worker_batt_banner_dismissed', '1'); } catch (e) {}
+                                        }}
+                                        className="w-8 h-8 rounded-xl bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-200 font-black text-xs flex items-center justify-center active:scale-95"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+                            </div>
                         )}
                         {leftSiteWarning && (
                             <div className="bg-rose-600 text-white p-4 rounded-3xl shadow-xl border-2 border-rose-300 animate-enter">
